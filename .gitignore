@@ -1,0 +1,55 @@
+# Keil MDK build outputs
+Objects/
+Listings/
+build/
+*.axf
+*.hex
+*.bin
+*.htm
+*.map
+*.dep
+*.d
+*.o
+*.crf
+*.dni
+*.build_log.htm
+*.iex
+*.lst
+*.m51
+*.m66
+*.orc
+*.sbr
+*.lst
+*.i
+*.lnp
+
+# Keil GUI / user-specific
+*.uvguix.*
+*.uvoptx
+JLinkLog.txt
+JLinkSettings.ini
+*.scvd
+EventRecorderStub.scvd
+
+# IDE
+.vscode/
+.eide/
+.trae/
+.cmsis/
+.pack/
+
+# Backup files
+*.bak*
+*.backup
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+log/
+
+# Temp
+*.tmp
+*~
