@@ -60,6 +60,22 @@ void lora_alarm_fire_result(const lora_slave_t *s, bool ok, bool gave_up, bool r
 /** 本条 0x03 失败：还有配额就回到 IDLE 等重发，用完就收尾并判离线 */
 void lora_alarm_on_fail(lora_slave_t *s);
 
+/* ==================== 下发队列（lora_downlink.c） ====================
+ * 投递在 data_cache，真正的空口发送 / ACK 重传 / 应答时序都在这个文件里。 */
+/** 把某台从机的待发指令发出去（组帧 + 发送）；true = 已发出 */
+bool lora_tx_downlink(uint8_t idx);
+
+/** 每秒一次：ACK 超时重传 + 声光主动下发 */
+void lora_downlink_logic(void);
+void lora_try_send_alarm_idle(void);
+
+/** 收到请求帧后"先回 0x80、再等 3s 下发"的两步时序 */
+void lora_reply_schedule(const uint8_t dev_uid[LORA_UID_BYTES], uint8_t func, uint8_t idx);
+void lora_reply_logic(void);
+
+/** 4G/MQTT 下行回调（注册给 g4_urc；唯一的下行入口） */
+void lora_mqtt_recv_cb(const char *topic, const uint8_t *data, uint16_t len);
+
 /** 0x08 出厂字段应答（on_frame 里 0x08 分支调用） */
 void lora_field_handle_resp(const lora_frame_t *frame, uint8_t idx);
 
