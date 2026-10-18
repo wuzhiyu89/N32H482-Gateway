@@ -64,7 +64,7 @@ try {
         # 是那个头文件本身的既有写法, 与 OTA 无关, 所以只压掉这一类。
         '-Wno-type-limits',
         '-I_host_test/stub', '-Iapp/links/g4', '-Iapp/links/lora', '-Iapp/links/serial',
-        '-Iapp/cloud', '-Iapp/model', '-Iapp/service', '-Iapp/common',
+        '-Iapp/cloud', '-Iapp/model', '-Iapp/service', '-Iapp/common', '-Iapp/core',
         '-Iapp/ota', '-Iapp/common/ring_buf', '-Iapp/cjson', '-Iapp/drivers/lora',
         '-I_host_test', '-Iinc'
         # -Iapp/ota 是 OTA over HTTP 这条线加的: md5.h 在 app/ota, 且后续

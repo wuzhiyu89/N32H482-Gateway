@@ -124,6 +124,7 @@
 #include "ota_port.h"     /* ota_port_reboot(): 校验通过后交给 bootloader 搬运 */
 #include "ota_health.h"   /* 2026-10-11: A/B 回滚判定+计数(开机 boot_step / 主循环 poll) */
 #include "cjson_port.h"      /* cJSON 入口: 静态池分配器 + hooks(见 app/cjson/cjson_port.h) */
+#include "app_state.h"       /* 共享运行时状态(时钟/最近档位) */
 
 #include "cloud_proto.h"     /* P1-2 信封/路由 + status.report 数据段 */
 #include "last_value.h"      /* v53: sen.query/dev.query 的"最近一次上报"时刻 */
@@ -195,51 +196,6 @@
  * MAIN_G4_ENABLE / MAIN_GW_ONLINE_ENABLE 是在本文件【更靠后】才 #define 的,
  * 在这里用它们做条件会恒为 0, 整个函数会被编译掉(踩过一次)。 */
 #if MAIN_STATUS_JSON_ENABLE
-/* ---- 缓存时钟 ----
- * g4_at_get_clock() 是【阻塞调用】(最长 1s), 而主循环里 LoRa 每 1ms、4G 每 5ms
- * 都要轮询一次。如果每 30s 都去问模组, 就会把这两个节拍各压 1 秒。
- * 所以: 只在缓存过期(10 分钟)时才问一次, 平时用 tick 差值外推。
- * 模组不在网时 g4_at_get_clock() 会立刻返回 false, 不会白等。 */
-static uint32_t s_epoch_base;      /* 上次问到的 Unix 秒 */
-static uint32_t s_epoch_tick;      /* 问到的时刻(get_tick_ms) */
-static bool     s_epoch_valid;
-
-#define MAIN_EPOCH_STALE_MS   600000u   /* 10 分钟 */
-
-static uint32_t main_now_unix(void)
-{
-    uint32_t tick = get_tick_ms();
-
-    if (s_epoch_valid)
-    {
-        return s_epoch_base + ((uint32_t)(tick - s_epoch_tick) / 1000u);
-    }
-    return tick / 1000u;            /* 还没问到模组时间: 退回开机秒数 */
-}
-
-static void main_refresh_epoch(void)
-{
-    g4_clock_t clk;
-
-    if (s_epoch_valid && ((uint32_t)(get_tick_ms() - s_epoch_tick) < MAIN_EPOCH_STALE_MS))
-    {
-        return;
-    }
-    if (g4_at_get_clock(&clk))
-    {
-        /* g4_at_get_clock() 给的是【北京时间】, 传 +28800 折成 UTC 的 Unix 秒 */
-        uint32_t ts = cloud_proto_calendar_to_unix((uint16_t)(2000u + clk.year),
-                                                   clk.month, clk.day,
-                                                   clk.hour, clk.minute, 0u, 28800);
-        if (ts != 0u)
-        {
-            s_epoch_base  = ts;
-            s_epoch_tick  = get_tick_ms();
-            s_epoch_valid = true;
-        }
-    }
-}
-
 /**
  * @brief 组一条 status.report 并按档位发到 status topic(文档 7.7 / 任务 P1-8)
  *
@@ -251,32 +207,6 @@ static void main_refresh_epoch(void)
  *     rsrp = 用 AT+CSQ 换算的 RSSI(3GPP: rssi=-113+2*csq), 本工程拿不到真 RSRP;
  *     configVersion / mode / currentGear 在 P2(配置) / P3(边缘评估) 落地前是占位值。
  */
-/* ==================================================================
- * 最近一次边缘评估结果(给状态上报 / 遥测取【实时】档位与状态)
- * ==================================================================
- * 【为什么要缓存它】level_supervisor 只对外给 poll()/mark_sent()/mark_event(),
- * 没有"当前档位"的 getter。而 status.report 与 telemetry 都需要【实时】档位。
- * 以前这里是硬编码: st->mode="auto"、st->current_gear=0 —— 于是平台看到的档位
- * 永远是 0(哪怕现场已经红灯禁行)。2026-09-30 第 10 条一并修掉。
- * ★ 纯 RAM, 不写 Flash(用户第 14 条决定: 网关不会断电)。 */
-static level_decision_t s_last_ld;
-static bool             s_last_ld_valid = false;
-
-/** 当前实时档位(还没有过有效评估时返回 0) */
-static uint8_t main_live_gear(void)
-{
-    return s_last_ld_valid ? s_last_ld.gear : 0U;
-}
-
-/** 当前实时状态名("Alarm"/"Warning"/"Normal"/"Resolved"); 没有有效评估时 "Normal" */
-static const char *main_live_state_name(void)
-{
-    if (!s_last_ld_valid) { return "Normal"; }
-    /* level_state_t 与 event_cache 的 EC_ST_* 数值完全一致(1..4), 直接复用同一份
-     * 名字映射, 免得"同一个状态两处叫法不同"。 */
-    return cloud_proto_state_name((uint8_t)s_last_ld.state);
-}
-
 /*!
  * \brief 填一份网关状态(供 status.report 与 sys.query_status 共用)
  * \note  ★ 只留这一处 ★ 在线数/信号/运行时长如果两处各算一份, 迟早会对不上
@@ -338,7 +268,7 @@ static void main_fill_status(cloud_status_t *st)
      *   以前这里恒填 "auto"/0, 平台看到的档位永远是 0。
      *   mode 暂时仍恒 "auto": manual 模式要等第 6 条(dev.ctrl)落地后才有第二种取值。 */
     st->mode           = "auto";
-    st->current_gear   = main_live_gear();
+    st->current_gear   = app_live_gear();
 }
 
 static sys_err_t main_publish_status_json(void)
@@ -353,7 +283,7 @@ static sys_err_t main_publish_status_json(void)
     uint16_t          plen;
     uint16_t          tlen;
 
-    main_refresh_epoch();
+    app_refresh_epoch();
 
     /* 状态字段统一由 main_fill_status() 填 —— 与 sys.query_status 共用一处 */
     main_fill_status(&st);
@@ -368,7 +298,7 @@ static sys_err_t main_publish_status_json(void)
     (void)snprintf(msg_id, sizeof(msg_id), "h%03u", (unsigned)(seq % 1000u));
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
-                                    "status.report", msg_id, main_now_unix(), data);
+                                    "status.report", msg_id, app_now_unix(), data);
     if (plen == 0u)
     {
         return SYS_ERR;
@@ -438,13 +368,6 @@ static struct
 } s_tel;
 static uint16_t s_tel_seq;
 
-/** 心跳/遥测共用的"周期秒数"取值(带兜底) */
-static uint32_t main_cfg_period_ms(uint16_t sec, uint32_t fallback_ms)
-{
-    if ((sec == 0U) || (sec > 3600U)) { return fallback_ms; }
-    return (uint32_t)sec * 1000U;
-}
-
 /**
  * @brief 组装并发布 telemetry.report
  * @param avg_mm 各在线液位传感器的平均水位(mm)
@@ -498,8 +421,8 @@ static sys_err_t main_publish_telemetry(int32_t avg_mm)
     t.sensor_count        = n;
     t.sensors             = sens;
     t.effective_level_mm  = avg_mm;
-    t.effective_status    = main_live_state_name();
-    t.effective_gear      = main_live_gear();
+    t.effective_status    = app_live_state_name();
+    t.effective_gear      = app_live_gear();
 
     dlen = cloud_proto_build_telemetry_data(data, (uint16_t)sizeof(data), &t);
     if (dlen == 0u)
@@ -512,7 +435,7 @@ static sys_err_t main_publish_telemetry(int32_t avg_mm)
     (void)snprintf(msg_id, sizeof(msg_id), "m%03u", (unsigned)(s_tel_seq % 1000u));
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
-                                    "telemetry.report", msg_id, main_now_unix(), data);
+                                    "telemetry.report", msg_id, app_now_unix(), data);
     if (plen == 0u)
     {
         log_info("[CLOUD] !! telemetry.report 信封组装失败\r\n");
@@ -589,7 +512,7 @@ static bool main_telemetry_ready(const config_store_t *cfg, uint32_t now_ms,
      *   ⚠️ MAIN_GW_ONLINE_MS 定义在本文件更靠后的 1584 行, 这里用不到,
      *      所以直接写 30000 —— 改那两个数时要【同步维护】。 */
     if ((uint32_t)(now_ms - s_tel.ok_ms)
-        >= main_cfg_period_ms(cfg->network.status_interval_s, 30000U))
+        >= app_cfg_period_ms(cfg->network.status_interval_s, 30000U))
     {
         return true;
     }
@@ -834,9 +757,9 @@ static void main_on_level_report(const uint8_t uid[LORA_UID_BYTES],
     rec.level_mm = level_mm;
     rec.bat_pct  = bat_pct;
     rec.rssi_dbm = rssi_dbm;
-    rec.ts       = main_now_unix();      /* ★收到这一帧的时刻(补报不改) */
-    rec.state    = s_last_ld_valid ? (uint8_t)s_last_ld.state : 0u;
-    rec.gear     = main_live_gear();
+    rec.ts       = app_now_unix();      /* ★收到这一帧的时刻(补报不改) */
+    rec.state    = app_live_state();
+    rec.gear     = app_live_gear();
     s_tel_seq = (uint16_t)((s_tel_seq + 1u) % 1000u);
     rec.msg_seq  = s_tel_seq;            /* 与在线遥测共用同一个序号计数器 */
 
@@ -890,7 +813,7 @@ static void main_telemetry_backfill_poll(void)
     t.sensors            = &s1;
     t.effective_level_mm = (int32_t)rec->level_mm;   /* 只有这一个数据点, 有效值就是它 */
     t.effective_status   = (rec->state != 0u) ? cloud_proto_state_name(rec->state)
-                                              : "Normal";   /* 与 main_live_state_name 同口径 */
+                                              : "Normal";   /* 与 app_live_state_name 同口径 */
     t.effective_gear     = rec->gear;
 
     dlen = cloud_proto_build_telemetry_data(data, (uint16_t)sizeof(data), &t);
@@ -1000,7 +923,7 @@ static void main_publish_device_event(const char *uid_hex, bool online,
         (void)memcpy(rec.uid, uid_b, CFG_UID_BYTES);
         rec.a    = online ? (uint8_t)EC_DEV_EV_ONLINE : (uint8_t)EC_DEV_EV_OFFLINE;
         rec.b    = is_sensor ? (uint8_t)EC_DEV_SENSOR : (uint8_t)EC_DEV_DEVICE;
-        rec.ts   = main_now_unix();
+        rec.ts   = app_now_unix();
         rec.seq  = 0U;                          /* 设备事件不按 seq 分组 */
         s_evt_seq = (uint16_t)((s_evt_seq + 1u) % 1000u);
         rec.msg_seq = s_evt_seq;                /* 与其它事件共用同一个序号计数器 */
@@ -1035,7 +958,7 @@ static void main_publish_device_event(const char *uid_hex, bool online,
     (void)snprintf(msg_id, sizeof(msg_id), "v%03u", (unsigned)(seq % 1000u));
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
-                                    "event.device", msg_id, main_now_unix(), data);
+                                    "event.device", msg_id, app_now_unix(), data);
     if (plen == 0u)
     {
         log_info("[CLOUD] !! event.device 信封组装失败\r\n");
@@ -1151,7 +1074,7 @@ static void main_publish_bind_event(const char *uid_hex, bool is_sensor,
     (void)snprintf(msg_id, sizeof(msg_id), "b%03u", (unsigned)(seq % 1000u));
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
-                                    "event.device", msg_id, main_now_unix(), data);
+                                    "event.device", msg_id, app_now_unix(), data);
     if (plen == 0u)
     {
         log_info("[CLOUD] !! event.device(bind) 信封组装失败\r\n");
@@ -1269,7 +1192,7 @@ static void main_on_alarm_result(const char *uid_hex, uint8_t gear,
         rec.b    = (uint8_t)(((cfg != NULL) &&
                               (cfg->rules.mode == (uint8_t)CFG_RULE_MANUAL))
                                  ? EC_TRIG_MANUAL : EC_TRIG_AUTO);
-        rec.ts   = main_now_unix();
+        rec.ts   = app_now_unix();
         rec.seq  = 0U;                      /* ★甲方案: 每台一条, 不分组★ */
         ec_action_set_code(&rec, res.code); /* ★结果码必须走访问器★ */
         s_evt_seq = (uint16_t)((s_evt_seq + 1u) % 1000u);
@@ -1296,7 +1219,7 @@ static void main_on_alarm_result(const char *uid_hex, uint8_t gear,
     (void)snprintf(msg_id, sizeof(msg_id), "a%03u", (unsigned)(seq % 1000u));
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
-                                    "event.action", msg_id, main_now_unix(), data);
+                                    "event.action", msg_id, app_now_unix(), data);
     if (plen == 0u)
     {
         log_info("[CLOUD] !! event.action 信封组装失败\r\n");
@@ -1366,7 +1289,7 @@ static void main_cache_status_change(uint8_t from_code, uint8_t to_code,
     rec.kind     = (uint8_t)EC_KIND_STATUS_CHANGE;
     rec.a        = to_code;                 /* to   */
     rec.b        = from_code;               /* from */
-    rec.ts       = main_now_unix();         /* ★ 原始发生时刻 */
+    rec.ts       = app_now_unix();         /* ★ 原始发生时刻 */
     rec.aux = level_mm;
     /* ★ 第 12 条: 现在就把"这条事件的 msgId 序号"定下来(与在线路径同一个计数器),
      * 补报时按 s<序号> 原样重建 —— 不再变成另一个 b<序号>。 */
@@ -1415,7 +1338,7 @@ static void main_publish_status_change(uint8_t from_code, uint8_t to_code,
     /* ★ 第 12 条: 与"断线入缓存"那条路共用 s_evt_seq, 同一个事件只有一个号 */
     s_evt_seq = (uint16_t)((s_evt_seq + 1u) % 1000u);
     (void)snprintf(msg_id, sizeof(msg_id), "s%03u", (unsigned)s_evt_seq);    plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
-                                    "event.status_change", msg_id, main_now_unix(), data);
+                                    "event.status_change", msg_id, app_now_unix(), data);
     if (plen == 0u)
     {
         log_info("[CLOUD] !! status_change 信封组装失败\r\n");
@@ -1580,7 +1503,7 @@ static void main_ota_progress_poll(void)
     (void)snprintf(msg_id, sizeof(msg_id), "p%03u", (unsigned)s_ota_seq);
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
-                                    "ota.progress", msg_id, main_now_unix(), data);
+                                    "ota.progress", msg_id, app_now_unix(), data);
     if (plen == 0u)
     {
         log_info("[CLOUD] !! ota.progress 信封组装失败\r\n");
@@ -1631,17 +1554,17 @@ static bool main_time_sync(uint32_t unix_ts)
     (void)unix_ts;                  /* 平台给的 ts 只用于日志对比, 不写时钟 */
 
     /* 强制下一次 refresh 真的去问模组(不然"没到陈旧阈值"就直接返回, 等于没校) */
-    s_epoch_valid = false;
-    main_refresh_epoch();
+    app_invalidate_epoch();
+    app_refresh_epoch();
 
-    if (!s_epoch_valid)
+    if (!app_epoch_valid())
     {
         log_info("[CLOUD] sys.time_sync: 向 4G 模组要时间【没要到】(模组不可用?) -> 1007\r\n");
         return false;
     }
 
     log_info("[CLOUD] sys.time_sync: 已从 4G 模组取时间 -> 本机 epoch=%lu (平台 ts=%lu)\r\n",
-             (unsigned long)main_now_unix(), (unsigned long)unix_ts);
+             (unsigned long)app_now_unix(), (unsigned long)unix_ts);
     return true;
 }
 
@@ -2312,8 +2235,8 @@ static bool main_cloud_downlink_try(const char *topic, const uint8_t *data, uint
     (void)memcpy(jsonbuf, data, len);
     jsonbuf[len] = '\0';
 
-    main_refresh_epoch();
-    rc = cloud_proto_handle(jsonbuf, main_now_unix(),
+    app_refresh_epoch();
+    rc = cloud_proto_handle(jsonbuf, app_now_unix(),
                             resp, (uint16_t)sizeof(resp), &rlen);
     log_info("[CLOUD] 处理完成 code=%d, 应答 %u 字节\r\n", rc, (unsigned)rlen);
 
@@ -2370,7 +2293,7 @@ static bool main_cloud_downlink_try(const char *topic, const uint8_t *data, uint
             elen = cloud_proto_build_resp(eresp, (uint16_t)sizeof(eresp), &rq,
                                           CLOUD_EC_RESP_TOO_BIG,
                                           "response too large; query by section",
-                                          NULL, main_now_unix());
+                                          NULL, app_now_unix());
             if ((elen > 0u) &&
                 (g4_at_mqtt_publish_ex(rtopic, (const uint8_t *)eresp, elen,
                                        cloud_profile_topic_qos(CLOUD_TOPIC_CMDRESP),
@@ -3831,7 +3754,7 @@ int main(void)
      *   150s 仍然远快于"云端一直等不到数据", 不至于让人等太久。 */
 #if MAIN_GW_ONLINE_ENABLE
     /* 保活停滞看门狗窗口 = 5 ×【实际配置的】心跳周期(以前用编译期宏, 配置改了就不匹配) */
-    g4_at_set_link_watchdog(5U * main_cfg_period_ms(config_store_get()->network.status_interval_s,
+    g4_at_set_link_watchdog(5U * app_cfg_period_ms(config_store_get()->network.status_interval_s,
                                                     MAIN_GW_ONLINE_MS));
 #else
     g4_at_set_link_watchdog(0U);
@@ -3864,9 +3787,9 @@ int main(void)
     cloud_proto_set_time_sync_hook(main_time_sync);
 
     /* sen.query / dev.query 的 lastTs 需要"收到那一帧时的 Unix 秒"(v53)。
-     * 用钩子注入 —— last_value 模块要能在 PC 上脱机单测, 不能直接调 main_now_unix()。
+     * 用钩子注入 —— last_value 模块要能在 PC 上脱机单测, 不能直接调 app_now_unix()。
      * ⚠ 不注册的话 lastTs 在应答里【根本不出现】, 不拿 0 冒充 1970。 */
-    last_value_set_now_hook(main_now_unix);
+    last_value_set_now_hook(app_now_unix);
 #if MAIN_STATUS_JSON_ENABLE
     /* 液位失联/恢复事件: lora_business 只负责"什么时候该报"(判定+跳变去重),
      * 真正的组 JSON + 发 event topic 在本文件的 main_publish_device_event()。
@@ -3995,7 +3918,7 @@ int main(void)
         /* (A2) sys.reboot 的延迟重启(v37+): 命令只登记"什么时候重启", 真正的软件复位
          *      在这里做 —— 这样 cloud_proto 不用直接碰 NVIC_SystemReset, 主机单测
          *      也能把这条命令的逻辑验完。纯比较, 每个循环跑一次的开销可以忽略。 */
-        if (cloud_proto_reboot_due(main_now_unix()))
+        if (cloud_proto_reboot_due(app_now_unix()))
         {
             log_info("[SYS] sys.reboot 到期, 执行软件复位(NVIC_SystemReset)...\r\n");
             delay_ms(50);               /* 让上面那行日志从串口发完 */
@@ -4060,8 +3983,7 @@ int main(void)
                  * 实时档位与状态(第 10 条: 以前那里硬编码 0/"auto") */
                 if (ld.new_sample && ld.have_level)
                 {
-                    s_last_ld       = ld;
-                    s_last_ld_valid = true;
+                    app_note_decision(&ld);
                 }
 
                 /* ---- (D1) 联动下发: 判据是 dispatch ---- */
@@ -4192,7 +4114,7 @@ int main(void)
          *   平台改了配置【一点反应都没有】。读不到/越界才回落到 MAIN_GW_ONLINE_MS。 */
 #if MAIN_G4_ENABLE && MAIN_GW_ONLINE_ENABLE
         {
-            uint32_t hb_period_ms = main_cfg_period_ms(config_store_get()->network.status_interval_s,
+            uint32_t hb_period_ms = app_cfg_period_ms(config_store_get()->network.status_interval_s,
                                                       MAIN_GW_ONLINE_MS);
 
             /* ★2026-10-07: 刚上线【立刻】发第一条 retained 状态, 把遗嘱盖掉★

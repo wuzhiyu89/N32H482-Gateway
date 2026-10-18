@@ -37,7 +37,7 @@
           <bCustSvd>0</bCustSvd>
           <UseEnv>0</UseEnv>
           <BinPath></BinPath>
-          <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
+          <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\core;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
           <LibPath></LibPath>
           <RegisterFilePath></RegisterFilePath>
           <DBRegisterFilePath></DBRegisterFilePath>
@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>N32H482, USE_STDPERIPH_DRIVER,BOARD_USE_HSE=1,HSE_VALUE=16000000U,LOG_ENABLE=1</Define>
               <Undefine></Undefine>
-              <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
+              <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\core;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -358,7 +358,7 @@
               <MiscControls></MiscControls>
               <Define></Define>
               <Undefine></Undefine>
-              <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
+              <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\core;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
             </VariousControls>
           </Aads>
           <LDads>
@@ -956,6 +956,21 @@
                     </File>
                   </Files>
                 </Group>
+                <Group>
+                  <GroupName>app\core</GroupName>
+                  <Files>
+                    <File>
+                      <FileName>app_state.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_state.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>app_state.h</FileName>
+                      <FileType>5</FileType>
+                      <FilePath>..\app\core\app_state.h</FilePath>
+                    </File>
+                  </Files>
+                </Group>
       </Groups>
     </Target>
     <Target>
@@ -989,7 +1004,7 @@
           <bCustSvd>0</bCustSvd>
           <UseEnv>0</UseEnv>
           <BinPath></BinPath>
-          <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
+          <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\core;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
           <LibPath></LibPath>
           <RegisterFilePath></RegisterFilePath>
           <DBRegisterFilePath></DBRegisterFilePath>
@@ -1292,7 +1307,7 @@
               <MiscControls></MiscControls>
               <Define>N32H482, USE_STDPERIPH_DRIVER,BOARD_USE_HSE=1,HSE_VALUE=16000000U,LOG_ENABLE=1</Define>
               <Undefine></Undefine>
-              <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
+              <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\core;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -1310,7 +1325,7 @@
               <MiscControls></MiscControls>
               <Define></Define>
               <Undefine></Undefine>
-              <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
+              <IncludePath>..\inc;..\firmware\CMSIS\core;..\firmware\CMSIS\device;..\firmware\n32h47x_48x_std_periph_driver\inc;..\bsp\inc;..\app\bsp;..\app\common;..\app\common\ring_buf;..\app\core;..\app\drivers\lora;..\app\links\g4;..\app\links\lora;..\app\links\serial;..\app\cloud;..\app\model;..\app\service;..\app\ota;..\app\log;..\app\cjson</IncludePath>
             </VariousControls>
           </Aads>
           <LDads>
@@ -1905,6 +1920,21 @@
                       <FileName>cjson_port.h</FileName>
                       <FileType>5</FileType>
                       <FilePath>..\app\cjson\cjson_port.h</FilePath>
+                    </File>
+                  </Files>
+                </Group>
+                <Group>
+                  <GroupName>app\core</GroupName>
+                  <Files>
+                    <File>
+                      <FileName>app_state.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_state.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>app_state.h</FileName>
+                      <FileType>5</FileType>
+                      <FilePath>..\app\core\app_state.h</FilePath>
                     </File>
                   </Files>
                 </Group>
