@@ -1006,6 +1006,11 @@
                       <FilePath>..\app\core\app_level.c</FilePath>
                     </File>
                     <File>
+                      <FileName>app_events.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_events.c</FilePath>
+                    </File>
+                    <File>
                       <FileName>app_modes.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\core\app_modes.c</FilePath>
@@ -2031,6 +2036,11 @@
                       <FileName>app_level.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\core\app_level.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>app_events.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_events.c</FilePath>
                     </File>
                     <File>
                       <FileName>app_modes.c</FileName>
