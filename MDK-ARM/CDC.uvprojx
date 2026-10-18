@@ -690,6 +690,16 @@
                       <FilePath>..\app\links\lora\lora_business.c</FilePath>
                     </File>
                     <File>
+                      <FileName>lora_internal.h</FileName>
+                      <FileType>5</FileType>
+                      <FilePath>..\app\links\lora\lora_internal.h</FilePath>
+                    </File>
+                    <File>
+                      <FileName>lora_field.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\links\lora\lora_field.c</FilePath>
+                    </File>
+                    <File>
                       <FileName>lora_business.h</FileName>
                       <FileType>5</FileType>
                       <FilePath>..\app\links\lora\lora_business.h</FilePath>
@@ -1741,6 +1751,16 @@
                       <FileName>lora_business.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\links\lora\lora_business.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>lora_internal.h</FileName>
+                      <FileType>5</FileType>
+                      <FilePath>..\app\links\lora\lora_internal.h</FilePath>
+                    </File>
+                    <File>
+                      <FileName>lora_field.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\links\lora\lora_field.c</FilePath>
                     </File>
                     <File>
                       <FileName>lora_business.h</FileName>
