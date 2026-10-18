@@ -50,4 +50,21 @@
 #define TICK_STATUS_MS           1000U
 #define MAIN_SERIAL_BAUD         115200U
 
+/* 串口 / LED / 4G 上电 / 周期心跳 */
+#ifndef MAIN_SERIAL_INIT_ENABLE
+#define MAIN_SERIAL_INIT_ENABLE  1   /* 初始化 RS232/RS485(协议待定, 仅建通道) */
+#endif
+#ifndef MAIN_HEARTBEAT_LED
+#define MAIN_HEARTBEAT_LED       0   /* PA8 是 4G 电源脚, 必须 0 */
+#endif
+#ifndef MAIN_G4_POWER_AT_BOOT
+#define MAIN_G4_POWER_AT_BOOT    0   /* 只控"提前上电+浪涌错峰"; 4G 最终由 g4_at_init 上电 */
+#endif
+#ifndef MAIN_GW_ONLINE_ENABLE
+#define MAIN_GW_ONLINE_ENABLE    1
+#endif
+#ifndef MAIN_GW_ONLINE_MS
+#define MAIN_GW_ONLINE_MS        30000U  /* 兜底值; 实际周期取配置 network.statusIntervalSeconds */
+#endif
+
 #endif /* APP_CONFIG_H */

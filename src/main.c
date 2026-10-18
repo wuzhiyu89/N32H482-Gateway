@@ -156,9 +156,6 @@
 /* ==================== 功能开关 ====================
  * 都写成 #ifndef, 这样也能在 Keil 的 C/C++ -> Define 里覆盖,
  * 不用为了改一个开关去动代码。 */
-#ifndef MAIN_SERIAL_INIT_ENABLE
-#define MAIN_SERIAL_INIT_ENABLE  1   /* 初始化 RS232/RS485(协议待定, 仅建通道) */
-#endif
 /* OTA 只有一条通道: over HTTP(S)(ota_http.c), 由 cloud_proto 的 ota.start 驱动。
  * 旧的 MQTT 分包版 ota.c 已于 2026-10-18 移入 archive/legacy/ota-mqtt/。
  * 这里只留进度上报的节拍参数。 */
@@ -166,9 +163,6 @@
  * 打开这个开关 = 主循环每 1s 翻转一次 PA8 = 每 1~2s 给 4G 模组断一次电,
  * 模组永远启动不完, 现象就是"AT_SYNC 一直重试、模组一个字节都不回"。
  * 所以默认必须是 0。要心跳灯请另找一根空闲脚。 */
-#ifndef MAIN_HEARTBEAT_LED
-#define MAIN_HEARTBEAT_LED       0
-#endif
 
 /* ---- P1-8: 心跳载荷改成文档要求的 status.report JSON ----
  * 1(默认) = 周期心跳发 {"event":"status.report",...} JSON
@@ -233,9 +227,6 @@
  *
  * 注意: 0 只是"不上电", PA8 依然会配成推挽输出并驱到【断电】电平(不会浮空)。
  */
-#ifndef MAIN_G4_POWER_AT_BOOT
-#define MAIN_G4_POWER_AT_BOOT    0
-#endif
 
 /* ==================== 主功能模式(三选一, 2026-09-27 起) ====================
  *
@@ -303,15 +294,6 @@
  *   · 收到即回执(ACK)              → 云端【知道指令送达了】。
  *
  * 只想留回执、不要定时心跳: 改成 0(不建议, 见上)。 */
-#ifndef MAIN_GW_ONLINE_ENABLE
-#define MAIN_GW_ONLINE_ENABLE    1
-#endif
-#ifndef MAIN_GW_ONLINE_MS
-/* 心跳周期的【兜底值】。真正的周期来自配置 network.statusIntervalSeconds
- * (2026-09-30 第 5 条: 以前只用这个宏, 于是云平台改了配置一点反应都没有)。
- * 读不到/越界时才回落到这个值。 */
-#define MAIN_GW_ONLINE_MS        30000U
-#endif
 
 /* ==================== 主循环节拍 ==================== */
 
