@@ -76,6 +76,10 @@ void app_cache_status_change(uint8_t from_code, uint8_t to_code,
 void app_publish_status_change(uint8_t from_code, uint8_t to_code,
                                uint8_t gear, int32_t level_mm);
 
+/* ---------------- 工程模式（不返回） -------------------------------------- */
+void app_mode_rawtest_run(void);   /* MAIN_MODE_LORA_TEST */
+void app_mode_pairing_run(void);   /* MAIN_MODE_PAIRING  */
+
 /* ---------------- 本地自治（水位 -> 联动） -------------------------------- */
 void app_failsafe_step(const level_decision_t *ld);   /* 全部失联 fail-safe */
 void app_manual_step(void);                            /* manual 窗口到期回归 */
