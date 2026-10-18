@@ -249,7 +249,8 @@ powershell -ExecutionPolicy Bypass -File tools\verify.ps1
       - 共享状态（时钟/最近档位）→ `app_state.c`
       - 两种工程模式 → `app_modes.c`
       - 开关与节拍常量 → `app_config.h`
-- [ ] `g4_at.c` 拆分：`g4_at_poll()` 一个函数 1384 行 → 按状态拆
+- [x] `g4_at.c`：`g4_at_poll()` **1384 → 221 行**，25 个状态各拆成 `g4_st_*()`，
+      状态迁移仍统一走 `g4_goto_state()`；`test_state` 35/35 通过
 - [ ] `cloud_proto.c` 拆分：21 条命令按域拆文件
 - [ ] `lora_business.c` 拆分：从机表 / 绑定 / 解绑 / 声光 / 字段 / 下行
 - [ ] 切断 `cloud ↔ lora_business` 双向依赖
