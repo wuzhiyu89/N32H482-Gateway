@@ -95,7 +95,9 @@
 | `app/links/serial` | `serial_proto.c` | RS232/485 收发（协议待定） | — |
 | `app/cloud` | `cloud_proto.c` | 信封解析/生成、21 条命令、msgId 幂等、7 类上行构造 | 不碰 MQTT 收发 |
 | | `cloud_json.c` | 极简 JSON 读写（零堆） | 不是通用库 |
-| `app/model` | `config_store.c` | 9 个配置域的校验/JSON/双区保存/CRC32 | 不决定"何时存" |
+| `app/model` | `config_store.c` | 9 个配置域的校验、出厂默认、双区 Flash 保存/回退、CRC32 | 不决定"何时存" |
+| | `config_parse.c` | 9 个域的解析 + 全局/逐域事务合并（`from_json` / `merge_sections`） | 不碰 Flash |
+| | `config_serialize.c` | 9 个域 -> JSON（cJSON 静态池）、CRC 复算、诊断打印 | 不做解析 |
 | | `param_save.c` | 掉电参数页：网关 UID、出厂字段、档位 | 不上云 |
 | | `cloud_profile.c` | topic / QoS / retained 的"本地档 / 文档档" | — |
 | | `last_value.c` | 每台设备的最后值快照（`sen.query`/`dev.query`） | — |

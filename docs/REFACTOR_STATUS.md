@@ -38,6 +38,7 @@
 | `cloud_proto.c` | 3,576 | **1,049** |
 | `app_uplink.c` | 1,491 | **830** |
 | `lora_business.c` | 3,012 | **634**（拆出 5 个文件，见下） |
+| `config_store.c` | 2,283 | **1,062**（解析 / 序列化拆出，见下） |
 
 新增的编排单元：`app/core/{app_boot,app_loop,app_state,app_config,app_console,app_downlink,app_uplink,app_events,app_level,app_modes}.c`。
 
@@ -56,6 +57,16 @@ LoRa 侧 2026-10-18 继续拆分（`lora_internal.h` 集中内部接口）：
 | `lora_business.c` | 帧分发、0x02 上报、失联检测、init / poll |
 
 `lora_field.c` 之前已拆出（出厂字段）。
+
+配置存储 2026-10-18 按"解析 / 序列化"拆开（内部接口在 `config_internal.h`）：
+
+| 文件 | 职责 |
+|---|---|
+| `config_store.c` | 校验、出厂默认、双区 Flash 读/写、版本/恢复出厂、UID 工具 |
+| `config_parse.c` | 取值助手 + 9 个域的解析 + 全局/逐域事务合并 |
+| `config_serialize.c` | 9 个域 -> JSON、CRC 复算、诊断打印 |
+
+解析与序列化共用同一份枚举名表（`config_internal.h` 里 extern），防止两边漂。
 
 ### 5. 文档与约定
 
@@ -81,8 +92,7 @@ LoRa 侧 2026-10-18 继续拆分（`lora_internal.h` 集中内部接口）：
 
 ## 二、未完成
 
-1. `config_store.c`（2,283 行）按 9 个配置域拆解析/序列化；
-2. **板上冒烟测试**（唯一未做的验证）：
+1. **板上冒烟测试**（唯一未做的验证）：
    - 开机横幅 → `进入主循环`；
    - `===== MQTT ONLINE! =====` + 一条 `status.report 已发`；
    - 液位发一帧，确认 `[LoRa RX]` / `[LEVEL]`；

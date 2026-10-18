@@ -100,7 +100,7 @@ try {
             exe  = '_host_test\test_cloud.exe'
             src  = @(
                 'app/cloud/cloud_json.c', 'app/cloud/cloud_proto.c', 'app/cloud/cloud_uplink.c', 'app/cloud/cloud_cmd_ota.c', 'app/cloud/cloud_cmd_sys.c', 'app/cloud/cloud_cmd_cfg.c', 'app/cloud/cloud_cmd_rule.c', 'app/cloud/cloud_cmd_devices.c',
-                'app/model/cloud_profile.c', 'app/model/config_store.c',
+                'app/model/cloud_profile.c', 'app/model/config_store.c', 'app/model/config_parse.c', 'app/model/config_serialize.c',
                 'app/common/utils.c',       # CRC32 等工具已搬到 app/common/utils.c
                 'app/service/sensor_offline.c', 'app/model/last_value.c',
                 'app/service/level_supervisor.c', 'app/service/level_eval.c',
@@ -121,7 +121,7 @@ try {
             name = 'test_cfg'
             exe  = '_host_test\test_cfg.exe'
             src  = @(
-                'app/model/config_store.c', 'app/cloud/cloud_json.c',
+                'app/model/config_store.c', 'app/model/config_parse.c', 'app/model/config_serialize.c', 'app/cloud/cloud_json.c',
                 'app/common/utils.c',       # CRC32 等工具已搬到 app/common/utils.c
                 'app/cjson/cJSON.c', 'app/cjson/cjson_port.c',
                 'app/common/ring_buf/ring_buf.c',

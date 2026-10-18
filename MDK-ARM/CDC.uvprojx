@@ -845,6 +845,21 @@
                       <FilePath>..\app\model\config_store.c</FilePath>
                     </File>
                     <File>
+                      <FileName>config_internal.h</FileName>
+                      <FileType>5</FileType>
+                      <FilePath>..\app\model\config_internal.h</FilePath>
+                    </File>
+                    <File>
+                      <FileName>config_serialize.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\model\config_serialize.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>config_parse.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\model\config_parse.c</FilePath>
+                    </File>
+                    <File>
                       <FileName>config_store.h</FileName>
                       <FileType>5</FileType>
                       <FilePath>..\app\model\config_store.h</FilePath>
@@ -1931,6 +1946,21 @@
                       <FileName>config_store.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\model\config_store.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>config_internal.h</FileName>
+                      <FileType>5</FileType>
+                      <FilePath>..\app\model\config_internal.h</FilePath>
+                    </File>
+                    <File>
+                      <FileName>config_serialize.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\model\config_serialize.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>config_parse.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\model\config_parse.c</FilePath>
                     </File>
                     <File>
                       <FileName>config_store.h</FileName>
