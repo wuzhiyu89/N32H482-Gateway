@@ -92,18 +92,14 @@ LoRa 侧 2026-10-18 继续拆分（`lora_internal.h` 集中内部接口）：
 
 ## 二、未完成
 
-1. **板上冒烟测试**（唯一未做的验证）：
-   - 开机横幅 → `进入主循环`；
-   - `===== MQTT ONLINE! =====` + 一条 `status.report 已发`；
-   - 液位发一帧，确认 `[LoRa RX]` / `[LEVEL]`；
-   - 产线流程 `#bind` → `#set` → `#get`。
+（无 —— 代码侧与板上冒烟都已完成。见下面第五节本轮结果。）
 
 > 主机测试覆盖不到 `main.c` / `app/core` / `app/links/lora`（`lora_business` 在测试里是替身）。
 > 这几块的结构改动只有构建与人工核对兜底，所以板上冒烟是必要的一步。
 > 本次 LoRa 拆分的额外核对：用脚本把拆分前 `lora_business.c` 的 **66 个函数逐个
 > 与拆分后比对**（只允许改 `static` 与跨文件改名），结果 0 处差异；
 > 只有 `on_frame` / `handle_ack_from_device` 两处是**有意**把"直接读 `g_bind`/`g_unbind`"
-> 换成 `lora_bind_*` / `lora_unbind_*` 访问器。
+> 换成 `lora_bind_*` / `lora_unbind_*` 访问器。config_store 拆分同样比对 **62 个函数，0 差异**。
 
 ## 三、坏注释修复的做法（踩坑后固化）
 
@@ -155,3 +151,29 @@ LoRa 侧 2026-10-18 继续拆分（`lora_internal.h` 集中内部接口）：
 - #get 只发一次 0x07，**必须在设备刚上报后立刻执行**，否则 12 s 超时。
   这不是网关缺陷，是"只发一次"策略与休眠设备的固有组合。
   **【用户已决定保持现状：不把 0x07 改成重发】**，后续重构不要顺手改这一行为。
+
+## 五、重构后回归（2026-10-18 晚，HEAD=0ad89b9，J-Link + COM14）
+
+烧录 `MDK-ARM\bin\CDC.bin`（`ALL CHECKS PASSED` 的同一份构建），J-Link `Program & Verify O.K.`。
+
+| 场景 | 结果 |
+|---|---|
+| 4G / MQTT | `CEREG=1`、IP 已分配、`status.report` 连续拿到 `puback` |
+| `#status` | status.report 248 B 已发 |
+| `#json cfg.query` | code 0，应答 1837 B，9 域 + `meta.crc32=3A20AF04`，cmdresp 有 puback |
+| `#json rule.query` | code 0，1050 B（gears + rules） |
+| `#json sys.query_status` | code 0，286 B，puback |
+| `#bind sensor 60`（同 UID 重绑） | 走 `config_store_rebind_device` 分支：`重新绑定(已在从机表, 不新增)`，`sensorsTotal` 仍为 1（**不新增条目**），event=bound |
+| 从机 0x02 | `[LoRa RX] func=0x02` → `[LEVEL]` → `telemetry.report 241 B`（level 0 / bat 49% / rssi -24） |
+| `#set TEST000001` | 0x06 第 3 条收到 0x80 → 写入成功 |
+| `#get`（上报后立即） | 0x07 → 0x08 `"TEST000001"` → 读取成功 |
+| 期间 4G 异常 | 一次 `+CME ERROR: 601`（MQTT 会话掉），既有快修逻辑自动恢复，puback 继续递增 |
+
+### 已知的"诊断误报"（不是缺陷，勿按它改代码）
+
+`#lora` 的"频率【回读 0x0880】"**不可信**：同一块板两次读到的值不同
+（`03 00 00 57` / `00 00 00 57`），而空口实际工作正常（`RX_DONE=20`、
+芯片 GetStats 收包 20、rssi -22~-27）。所以那条
+`!! SET_RFFREQUENCY 没有生效` 是**误报**；判断射频好坏请看
+`RX_DONE / PREAMBLE_DETECTED / 芯片 GetStats` 这三组累计值。
+（`SYNCWORD_VALID` 恒 0 属正常：IRQ 掩码里没开它。）
