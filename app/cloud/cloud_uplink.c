@@ -27,8 +27,8 @@
 /* ★ 必须是 static ★ —— 16 × 256 B = 4 KB, 放栈上一次就把 4 KB 栈吃掉了。 */
 static char        s_bf_text[CLOUD_BACKFILL_MAX][CLOUD_BACKFILL_EV_MAX];
 static const char *s_bf_ptr[CLOUD_BACKFILL_MAX];
-/* �缓存里的 uid �3 字节, 而协议层�results[] 要的�hex 字符�� * (这个缝是编译器抓出来� 两边�uid 表示法本来就不一样�� */
-static char                  s_bf_uid[CLOUD_BACKFILL_MAX][CFG_UID_STR_MAX];
+/* 缓存里的 uid 是 13 字节二进制, 而协议层的 results[] 要的是 hex 字符串
+ * (这个缝是编译器抓出来的 —— 两边 uid 表示法本来就不一样)。 */
 static cloud_action_result_t s_bf_res[CLOUD_BACKFILL_MAX];
 
 /**
