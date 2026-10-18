@@ -254,7 +254,7 @@ powershell -ExecutionPolicy Bypass -File tools\verify.ps1
 - [x] `cloud_proto.c` 拆分完成：3,576 → 1,049 行。上行构造 → `cloud_uplink.c`；命令按域 → `cloud_cmd_{sys,ota,cfg,rule,devices}.c`；只剩信封/幂等/分发表/日历/暂存缓冲
 - [x] `lora_business.c` 拆分（进行中）：出厂字段状态机 → `lora_field.c`（配合 `lora_internal.h`）；其余（从机表/绑定/解绑/声光/下发）待拆
 - [ ] 切断 `cloud ↔ lora_business` 双向依赖
-- [ ] 两套 JSON（`cloud_json` + `cJSON`）的边界写清楚，能合则合
+- [x] 两套 JSON 的边界已成文（docs/JSON.md）：解析用 `cloud_json`（零堆），构造/打印用 `cJSON` + 静态池；**不做合并**（合并会丢其中一边的内存特性）
 - [ ] 修复被编码损坏的注释（`cloud_proto.c` 293 行、`radio.c` 76 处等）
 
 每一步都单独提交，并且必须保持：**构建 0/0、图像尺寸不变或按预期变小、

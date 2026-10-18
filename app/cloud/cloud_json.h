@@ -1,11 +1,18 @@
 /**
  * @file  cloud_json.h
- * @brief 极简 JSON 生成/解析(专为端侧设计, 无动态内存)
+ * @brief 零堆 JSON 解析 + 极简写出（端侧专用）
  *
- * 为什么不用 cJSON:
- *   本工程 startup_n32h47x_48x.s 里 Heap_Size 只有 0x200 = 512 字节,
- *   cJSON 大量 malloc, 一跑就挂。所以这里全部用调用方提供的静态缓冲,
- *   不做任何堆分配。
+ * 本工程有【两层】JSON，职责严格分开 —— 新代码请遵守：
+ *
+ *   解析（下行命令里的标量 / 子对象）      -> 本文件 cj_get_* 系列
+ *       零堆、只读原缓冲、按路径取值；不需要建树。
+ *
+ *   构造 / 打印（信封、应答、上行 data）    -> cJSON + cjson_port
+ *       走 24 KB 静态池（cjson_port_init() 装 hooks）。本工程 Heap_Size 只有
+ *       0x200 = 512 B，所以 cJSON 必须走池，不能用裸 malloc。
+ *
+ *   两边不要交叉：能 cj_get 取到的字段不要用 cJSON 再解析一遍；
+ *   需要池管理的大对象（信封/整份配置）不要用 cjw_* 手拼。
  *
  * 解析能力:
  *   - 按"路径"取标量值: "cmd" / "data.threshold" / "data.sensors[0].addr"
@@ -17,7 +24,9 @@
  * 生成能力:
  *   cjw_* 系列, 自动处理逗号/引号/转义, 溢出时置 ovf 标志而不是越界。
  *
- * 体积: 约 4KB flash, 0 RAM(全部用调用方缓冲)。
+ * 体积: 约 4KB flash, 0 额外 RAM(全部用调用方缓冲)。
+ *
+ * 边界与示例见 docs/JSON.md。
  */
 #ifndef __CLOUD_JSON_H__
 #define __CLOUD_JSON_H__
