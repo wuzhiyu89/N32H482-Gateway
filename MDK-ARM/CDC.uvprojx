@@ -690,6 +690,11 @@
                       <FilePath>..\app\links\lora\lora_business.c</FilePath>
                     </File>
                     <File>
+                      <FileName>lora_alarm.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\links\lora\lora_alarm.c</FilePath>
+                    </File>
+                    <File>
                       <FileName>lora_slave.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\links\lora\lora_slave.c</FilePath>
@@ -1756,6 +1761,11 @@
                       <FileName>lora_business.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\links\lora\lora_business.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>lora_alarm.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\links\lora\lora_alarm.c</FilePath>
                     </File>
                     <File>
                       <FileName>lora_slave.c</FileName>

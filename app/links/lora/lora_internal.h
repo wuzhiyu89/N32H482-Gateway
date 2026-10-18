@@ -44,6 +44,22 @@ uint8_t lora_dev_type_of_uid(const uint8_t uid[LORA_UID_BYTES]);
 /** ASCII hex 文本 -> 二进制（旧格式下行的兼容分支用）；-1 = 非法 */
 int lora_hex_str2bin(const char *hex, int hex_len, uint8_t *out, int out_max);
 
+/* ==================== 声光 0x03 执行结果状态机（lora_alarm.c） ====================
+ * 0x03 是"三段式应答"：0x80 = 收到了，0x82 = 执行成功，0x83 = 执行失败。
+ * 15 秒窗口、最多 3 条，3 条都没成功 = 声光报警器离线。 */
+#define LORA_ALARM_TIMEOUT_MS   15000u   /* 单条 0x03 等 0x82/0x83 的窗口(用户指定 15s) */
+#define LORA_ALARM_MAX_ATTEMPTS 3u       /* 单条动作最多发几条(用户指定 3 条) */
+#define LORA_ALARM_RETRY_GAP_MS 500u     /* 重发前的最小间隔(给设备射频恢复时间) */
+
+/** 正在下发的这条动作是哪个档位（档位不在空口载荷里，上报 event.action 要用） */
+extern uint8_t g_alarm_gear_inflight;
+
+/** 上报一次 0x03 执行结果（成功/失败/放弃/恢复） */
+void lora_alarm_fire_result(const lora_slave_t *s, bool ok, bool gave_up, bool recovered);
+
+/** 本条 0x03 失败：还有配额就回到 IDLE 等重发，用完就收尾并判离线 */
+void lora_alarm_on_fail(lora_slave_t *s);
+
 /** 0x08 出厂字段应答（on_frame 里 0x08 分支调用） */
 void lora_field_handle_resp(const lora_frame_t *frame, uint8_t idx);
 
