@@ -21,7 +21,7 @@
 #include "log.h"
 
 /* ---- 断线补报的一页组装 (v67) ---- */
-#define CLOUD_BACKFILL_MAX      16u     /* 丢�批最�16 �见头文件: 栈只�4 KB) */
+#define CLOUD_BACKFILL_MAX      16u     /* 一批最多 16 条(见头文件: 栈只有 4 KB) */
 #define CLOUD_BACKFILL_EV_MAX   256u    /* 单个事件对象文本上限 */
 
 /* ★ 必须是 static ★ —— 16 × 256 B = 4 KB, 放栈上一次就把 4 KB 栈吃掉了。 */
