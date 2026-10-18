@@ -31,6 +31,9 @@ void app_report_reset_cause(void);      /* 开机：打印上次复位原因 */
  */
 bool app_downlink_try(const char *topic, const uint8_t *data, uint16_t len);
 
+/** LoRa 关闭时的 MQTT 下行回调：JSON 照走云协议，其余只打印 + 回执 */
+void app_downlink_log_cb(const char *topic, const uint8_t *data, uint16_t len);
+
 /* ---------------- 上行 --------------------------------------------------- */
 /** 组一条 status.report 并按档位发布（心跳 / #status 共用） */
 sys_err_t app_publish_status_json(void);

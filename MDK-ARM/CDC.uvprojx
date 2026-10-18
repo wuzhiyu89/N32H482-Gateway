@@ -975,6 +975,11 @@
                       <FileType>5</FileType>
                       <FilePath>..\app\core\app_config.h</FilePath>
                     </File>
+                    <File>
+                      <FileName>app_downlink.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_downlink.c</FilePath>
+                    </File>
                                       <File>
                       <FileName>app_core.h</FileName>
                       <FileType>5</FileType>
@@ -1956,6 +1961,11 @@
                       <FileName>app_config.h</FileName>
                       <FileType>5</FileType>
                       <FilePath>..\app\core\app_config.h</FilePath>
+                    </File>
+                    <File>
+                      <FileName>app_downlink.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_downlink.c</FilePath>
                     </File>
                   </Files>
                 </Group>
