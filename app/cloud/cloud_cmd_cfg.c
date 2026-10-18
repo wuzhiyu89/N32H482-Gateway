@@ -19,8 +19,10 @@
 
 /**
  * @brief cfg.set —— 文档 5.2
- *   data.expectVersion(uint32, 必填): 与当�configVersion 不一�-> 1002 且��什么都不改� *   data.effectiveMode(string, 可��: immediate(默认) / reboot
- *   data.sections(object, 必填): 键为域名, 值为该域完整或部分字� *   应答 data: {"configVersion":7,"applied":["thresholds","sensors"],"rejected":[]}
+ *   data.expectVersion(uint32, 必填): 与当前 configVersion 不一致 -> 1002，且什么都不改；
+ *   data.effectiveMode(string, 可选): immediate(默认) / reboot
+ *   data.sections(object, 必填): 键为域名, 值为该域完整或部分字段
+ *   应答 data: {"configVersion":7,"applied":["thresholds","sensors"],"rejected":[]}
  */
 int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data)
 {
@@ -41,7 +43,8 @@ int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data)
     {
         return CLOUD_EC_PARAM;              /* 缺失或不是数字 */
     }
-    /* 超出 uint32 的巨型数字会落到这里给的哨兵� 结果是与当前版本不符 -> 1002�     * 1001/1002 都是"拒绝", 平台都看得懂, 不必为这种输入再分一档��*/
+    /* 超出 uint32 的巨型数字会落到这里给的哨兵值, 结果是与当前版本不符 -> 1002。
+     * 1001/1002 都是"拒绝", 平台都看得懂, 不必为这种输入再分一档。 */
     expect = cj_get_uint(req->data, "expectVersion", 0xFFFFFFFFu);
 
     cur = config_store_version();
@@ -51,7 +54,7 @@ int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data)
         return CLOUD_EC_VER_CONFLICT;
     }
 
-    /* ---- data.effectiveMode(可�� ---- */
+    /* ---- data.effectiveMode(可选) ---- */
     if (cj_get(req->data, "effectiveMode", NULL, 0) != CJ_NOTFOUND)
     {
         char mode[16];
