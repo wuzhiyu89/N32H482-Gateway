@@ -29,6 +29,16 @@ int  cloud_cfg_sections_mask(const cloud_req_t *req, uint16_t *mask);
 bool cloud_write_section_list(cJSON *obj, const char *key, uint8_t mask);
 
 /* 命令处理函数（按域拆文件；命令表仍在 cloud_proto.c） */
+int cloud_cmd_sen_bind(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_sen_unbind(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_sen_set(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_sen_query(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_dev_bind(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_dev_unbind(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_dev_set(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_dev_query(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_dev_ctrl(const cloud_req_t *req, cJSON *data);
+
 int cloud_cmd_rule_set(const cloud_req_t *req, cJSON *data);
 int cloud_cmd_rule_query(const cloud_req_t *req, cJSON *data);
 int cloud_cmd_rule_mode(const cloud_req_t *req, cJSON *data);
