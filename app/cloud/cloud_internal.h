@@ -11,12 +11,28 @@
 #include <stdbool.h>
 #include "cJSON.h"
 #include "cloud_proto.h"      /* cloud_status_t */
+#include "config_store.h"    /* config_store_t */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* 命令处理函数（按域拆文件；命令表仍在 cloud_proto.c） */
+/* 配置域个数（域名表的顺序 = 文档 3.2） */
+#define CLOUD_CFG_SECTION_N 9u
+extern const char *const cloud_cfg_section_names[CLOUD_CFG_SECTION_N];
+
+/* cloud_proto.c 提供、命令文件共用的基础设施 */
+extern config_store_t cloud_cfg_staging_buf;   /* 整份配置的暂存副本 */
+int  cloud_commit_config(const config_store_t *tmp);
+int  cloud_cfg_sections_mask(const cloud_req_t *req, uint16_t *mask);
+bool cloud_write_section_list(cJSON *obj, const char *key, uint8_t mask);
+
+/* 命令处理函数（按域拆文件；命令表仍在 cloud_proto.c） */
+int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_cfg_query(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_sys_factory_reset(const cloud_req_t *req, cJSON *data);
+
 int cloud_cmd_sys_query_status(const cloud_req_t *req, cJSON *data);
 int cloud_cmd_sys_time_sync(const cloud_req_t *req, cJSON *data);
 int cloud_cmd_sys_reboot(const cloud_req_t *req, cJSON *data);
