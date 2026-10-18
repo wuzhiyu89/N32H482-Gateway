@@ -112,6 +112,7 @@
 
 #include "local_alarm.h"
 #include "param_save.h"
+#include "n32h47x_48x_dbg.h"   /* 2026-10-18: GetUID() —— 读芯片 96 位唯一 ID */
 #include "data_cache.h"
 #include "bsp_gpio.h"   /* G4_PowerSwitch_Init(): 4G 模组电源开关 PA8 */
 
@@ -132,6 +133,7 @@
 #include "last_value.h"      /* v53: sen.query/dev.query 的"最近一次上报"时刻 */
 #include "level_supervisor.h"/* v54: 边缘水位评估的取数+串接层 */
 #include "event_cache.h"     /* v69: 断线期间把事件存起来, 重连后补报 */
+#include "telemetry_cache.h" /* ★2026-10-18: 断线期间把【每次液位上报】存起来, 重连后补报 */
 #include "cloud_profile.h"   /* P1-0 本地/文档 档位(topic / QoS / retained) */
 #include "config_store.h"    /* P2-4: cfg.query 应答要用 CFG_JSON_MAX 定缓冲 */
 #include "sensor_offline.h"  /* 液位失联判定(#offline 诊断用; 事件发布在下面) */
@@ -297,15 +299,29 @@ static void main_fill_status(cloud_status_t *st)
 
     (void)memset(st, 0, sizeof(*st));
 
-    /* 子设备在线/总数 —— 来自 LoRa 从机表(已在维护 is_online) */
+    /* 子设备在线/总数 —— 来自 LoRa 从机表
+     *
+     * ★2026-10-18: 判据统一到 lora_business_device_state_bytes() ★
+     *   以前这里直接用 sl[i].is_online, 而那个字段对【声光】是"收到过帧/绑定过"
+     *   的粘滞标志 —— 声光断电后它仍然是 true(声光平时不收帧, 永远不会被清),
+     *   于是出现自相矛盾: dev.query 说 online:false(按"3 条 0x03 都没成功"判),
+     *   status.report 的 devicesOnline 却还把它算作在线。
+     *   现在两处共用同一份判据(见 lora_business_device_state_bytes):
+     *     · 液位 : is_online(由 sensor_offline 状态机维护)
+     *     · 声光 : !alarm_offline_reported(3 条 0x03 都没成功才置位)
+     *   ⇒ status.report / sys.query_status / sen.query / dev.query 四处的
+     *     在线口径从此完全一致。 */
     sl  = lora_business_get_slave_list();
     cnt = lora_business_get_slave_count();
     for (i = 0u; (i < cnt) && (sl != NULL); i++)
     {
+        bool on = (lora_business_device_state_bytes(sl[i].dev_uid)
+                   == LORA_DEV_STATE_ONLINE);
+
         if (sl[i].dev_type == SLAVE_TYPE_ALARM_OUT)
         {
             st->devices_total++;
-            if (sl[i].is_online)
+            if (on)
             {
                 st->devices_online++;
             }
@@ -313,7 +329,7 @@ static void main_fill_status(cloud_status_t *st)
         else
         {
             st->sensors_total++;
-            if (sl[i].is_online)
+            if (on)
             {
                 st->sensors_online++;
             }
@@ -383,11 +399,15 @@ static sys_err_t main_publish_status_json(void)
 /* ==================================================================
  * telemetry.report —— 水位遥测上行(文档 7.1, 用户 2026-09-30 第 3 条)
  * ==================================================================
- * 【触发条件】(文档: "周期上报(周期 = network.statusIntervalSeconds) 或水位变化
- *   超过 minChangeCm 时触发")
- *     · 周期 = config_store.network.statusIntervalSeconds(10~600s, 默认 60);
- *     · 变化量 = |本次有效水位 - 上次遥测的水位| >= thresholds.minChangeCm。
- *   上电第一条恒发(不然云端要等一个周期才看得到水位)。
+ * 【触发条件】★2026-10-18 用户要求: 与心跳【严格同周期】★
+ *     · 周期 = config_store.network.statusIntervalSeconds(10~600s, 默认 30);
+ *       —— 与 status.report(心跳)用的是【同一个字段、同一个兜底值(30s)】,
+ *          所以"心跳一拍, 遥测也一拍", 两者的时间点始终对齐。
+ *     · 每条遥测都是【全量】: 把当时所有"在线且启用"的液位【一起】塞进 data.sensors[]。
+ *       绑定了 2 台就有 2 个元素, 不会一台一条地发。
+ *     · 文档 7.1 里"水位变化超过 minChangeCm 也触发"这条【已停用】
+ *       (见 main_telemetry_ready 的 ④) —— 否则上报间隔会被水位抖动带偏,
+ *       不再等于心跳周期。上电第一条仍然恒发。
  *
  * 【★ 水位怎么算: 取【平均值】, 以及为什么 ★】
  *   用户口径(2026-09-30 第 3 条): 遥测里的水位取各液位传感器的【平均值】
@@ -461,7 +481,7 @@ static sys_err_t main_publish_telemetry(int32_t avg_mm)
     for (i = 0u; (i < cfg->sensor_count) && (i < (uint8_t)CFG_SENSOR_MAX); i++)
     {
         const cfg_sensor_t *s = &cfg->sensors[i];
-        uint8_t      uid3[3];
+        uint8_t      uid3[CFG_UID_BYTES];
         last_value_t lv;
         uint32_t     thr;
 
@@ -539,7 +559,7 @@ static bool main_telemetry_ready(const config_store_t *cfg, uint32_t now_ms,
     for (i = 0u; (i < cfg->sensor_count) && (i < (uint8_t)CFG_SENSOR_MAX); i++)
     {
         const cfg_sensor_t *s = &cfg->sensors[i];
-        uint8_t      uid3[3];
+        uint8_t      uid3[CFG_UID_BYTES];
         last_value_t lv;
 
         if (s->enabled == 0u) { continue; }
@@ -567,17 +587,34 @@ static bool main_telemetry_ready(const config_store_t *cfg, uint32_t now_ms,
         return true;
     }
 
-    /* ③ 周期到(周期 = network.statusIntervalSeconds, 与心跳同一个字段) */
+    /* ③ 周期到(周期 = network.statusIntervalSeconds, 与心跳同一个字段)
+     *
+     * ★2026-10-18 用户要求: 【上报周期与心跳严格一致】★
+     *   兜底值原来是 60000, 而心跳(MAIN_GW_ONLINE_MS)的兜底是 30000 ——
+     *   只要 statusIntervalSeconds 缺失/越界, 两者间隔就差一倍。
+     *   现在统一成 30000(与 MAIN_GW_ONLINE_MS 同值), 保证"心跳一拍、遥测也一拍"。
+     *   ⚠️ MAIN_GW_ONLINE_MS 定义在本文件更靠后的 1584 行, 这里用不到,
+     *      所以直接写 30000 —— 改那两个数时要【同步维护】。 */
     if ((uint32_t)(now_ms - s_tel.ok_ms)
-        >= main_cfg_period_ms(cfg->network.status_interval_s, 60000U))
+        >= main_cfg_period_ms(cfg->network.status_interval_s, 30000U))
     {
         return true;
     }
 
-    /* ④ 变化量 >= minChangeCm(文档 7.1 第二条腿) */
+    /* ④ 【已停用】变化量 >= minChangeCm 的提前触发
+     *
+     * ★2026-10-18 用户要求"网关上报周期应该和心跳一起(间隔一致)"★
+     *   原来这条会让遥测在任何一台液位变化超过 minChangeCm 时【提前】发,
+     *   于是实际上报间隔取决于水位抖动, 与心跳不同步。
+     *   现在只保留周期触发(③) —— 每条遥测都是【整周期、全量、所有液位一起】。
+     *   要恢复旧行为, 把下面的 #if 0 改成 #if 1 即可。 */
+#if 0
     delta = *out_avg - s_tel.last_mm;
     if (delta < 0) { delta = -delta; }
     if (delta >= (int32_t)cfg->thresholds.min_change_cm * 10) { return true; }
+#endif
+
+    (void)delta;                    /* delta 只在上面那段(默认关掉)里用, 消掉未使用告警 */
 
     return false;
 }
@@ -766,6 +803,142 @@ static void main_telemetry_step(void)
     }
 }
 
+/* ==================================================================
+ * 离线期间的【逐条液位上报】缓存 + 重连补报 (★2026-10-18)
+ * ==================================================================
+ * 【用户口径】离线后补报的是【每次传感器上报的水位】, 不是 30 秒聚合遥测。
+ *   ⇒ 一条记录 = 一台液位的一次 0x02; 补报时一条记录发一条 telemetry.report
+ *     (sensors[] 里就那一个元素)。
+ *
+ * 【为什么以前会丢】main_telemetry_step() 一开头就
+ *   `if (!g4_at_is_online()) return;` —— 断线期间根本不生成遥测。
+ *   而 LoRa 与 4G 独立, 液位照常上报 ⇒ 这些数据直接消失了。
+ *
+ * 【时间戳】rec.ts = 收到这一帧时的 Unix 秒 ⇒ 补报时【原样】用于
+ *   信封 ts 与 sensors[].ts —— 用户明确要求"要是当时的时间戳"。
+ *
+ * 【不重复】只在 4G 离线时捕获; 在线时走原有的 30s 聚合遥测, 两条路互斥。
+ * ================================================================== */
+
+/** 每次液位上报(0x02)的回调 —— 4G 离线时存一条, 在线时什么也不做 */
+static void main_on_level_report(const uint8_t uid[LORA_UID_BYTES],
+                                 uint16_t level_mm, uint8_t bat_pct,
+                                 int8_t rssi_dbm)
+{
+    tc_record_t rec;
+
+    if (g4_at_is_online())
+    {
+        return;                     /* 在线: 走 30s 聚合遥测, 不重复存 */
+    }
+    if (uid == NULL)
+    {
+        return;
+    }
+
+    (void)memset(&rec, 0, sizeof(rec));
+    (void)memcpy(rec.uid, uid, TELEMETRY_UID_BYTES);
+    rec.level_mm = level_mm;
+    rec.bat_pct  = bat_pct;
+    rec.rssi_dbm = rssi_dbm;
+    rec.ts       = main_now_unix();      /* ★收到这一帧的时刻(补报不改) */
+    rec.state    = s_last_ld_valid ? (uint8_t)s_last_ld.state : 0u;
+    rec.gear     = main_live_gear();
+    s_tel_seq = (uint16_t)((s_tel_seq + 1u) % 1000u);
+    rec.msg_seq  = s_tel_seq;            /* 与在线遥测共用同一个序号计数器 */
+
+    (void)telemetry_cache_push(&rec);
+}
+
+/**
+ * @brief 重连后补报一条"逐条上报"遥测
+ * @note  一次只发一条(一条记录 = 一条消息), 由主循环反复调用直到清空。
+ *        与 main_backfill_poll 同一条纪律: 【先发后删】, 登记失败一条都不动;
+ *        "渲染不出来"的条也出队(否则永远堵在队头), 但会打日志。
+ */
+static void main_telemetry_backfill_poll(void)
+{
+    /* 一律 static: 栈只有 4 KB */
+    static char data[CLOUD_RESP_MAX];
+    static char payload[CLOUD_RESP_MAX];
+    static char topic[64];
+    const tc_record_t *rec;
+    cloud_telemetry_sensor_t s1;
+    cloud_telemetry_t  t;
+    char               uid_hex[CFG_UID_STR_MAX];
+    char               msg_id[20];
+    uint16_t           dlen;
+    uint16_t           plen;
+    uint16_t           tlen;
+
+    if (!g4_at_is_online())
+    {
+        return;                     /* 还断着: 不补 */
+    }
+
+    rec = telemetry_cache_peek();
+    if (rec == NULL)
+    {
+        return;                     /* 没有待补的 */
+    }
+
+    (void)cfg_uid_from_bytes(rec->uid, uid_hex);
+
+    (void)memset(&s1, 0, sizeof(s1));
+    s1.uid         = uid_hex;
+    s1.level_mm    = (int32_t)rec->level_mm;
+    s1.raw_mm      = (uint32_t)rec->level_mm;
+    s1.battery_pct = rec->bat_pct;
+    s1.rssi_dbm    = (int32_t)rec->rssi_dbm;
+    s1.ts          = rec->ts;           /* ★该台上报发生的时刻 */
+
+    (void)memset(&t, 0, sizeof(t));
+    t.sensor_count       = 1u;          /* 一条记录就一台 */
+    t.sensors            = &s1;
+    t.effective_level_mm = (int32_t)rec->level_mm;   /* 只有这一个数据点, 有效值就是它 */
+    t.effective_status   = (rec->state != 0u) ? cloud_proto_state_name(rec->state)
+                                              : "Normal";   /* 与 main_live_state_name 同口径 */
+    t.effective_gear     = rec->gear;
+
+    dlen = cloud_proto_build_telemetry_data(data, (uint16_t)sizeof(data), &t);
+    if (dlen == 0u)
+    {
+        log_info("[CLOUD] !! 补报遥测 渲染失败(uid=%s) -> 丢弃这一条(否则堵队头)\r\n", uid_hex);
+        telemetry_cache_drop();
+        return;
+    }
+
+    (void)snprintf(msg_id, sizeof(msg_id), "m%03u", (unsigned)rec->msg_seq);
+
+    /* ★信封 ts 也用 record 的 ts —— 不是补报时刻 */
+    plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
+                                    "telemetry.report", msg_id, rec->ts, data);
+    if (plen == 0u)
+    {
+        log_info("[CLOUD] !! 补报遥测 信封失败(uid=%s) -> 丢弃这一条\r\n", uid_hex);
+        telemetry_cache_drop();
+        return;
+    }
+
+    tlen = cloud_profile_build_topic(CLOUD_TOPIC_TELEMETRY, topic, (uint16_t)sizeof(topic));
+    if (tlen == 0u)
+    {
+        return;                     /* topic 拼不出来: 不丢, 下次再试 */
+    }
+
+    log_info("[CLOUD] 补报 %s (%u 字节, ts=%lu): %s\r\n",
+             topic, (unsigned)plen, (unsigned long)rec->ts, payload);
+
+    if (g4_at_mqtt_publish_ex(topic, (const uint8_t *)payload, plen,
+                              cloud_profile_topic_qos(CLOUD_TOPIC_TELEMETRY),
+                              cloud_profile_topic_retained(CLOUD_TOPIC_TELEMETRY)) != SYS_OK)
+    {
+        return;                     /* 登记失败: 不丢, 下次再来 */
+    }
+
+    telemetry_cache_drop();
+}
+
 /**
  * @brief 组一条 event.device(文档 7.4) 发到 event topic —— 液位失联/恢复
  *
@@ -774,7 +947,7 @@ static void main_telemetry_step(void)
  *     "data": { "addr": 1, "devType": "sensor", "event": "offline" } }
  *   event 取值: bound / bind_failed / unbound / online / offline / low_voltage。
  *
- * 【字段口径】: 本工程子设备寻址是 3 字节 UID 的 hex 串(偏差 D-8), 文档那个
+ * 【字段口径】: 本工程子设备寻址是 13 字节 UID 的 26 位 hex 串(偏差 D-8), 文档那个
  * uint16 的 "addr" 装不下, 所以 data 里用 "uid":"210001"; "devType" 与 "event"
  * 两个字段名与取值【严格照文档】。
  *
@@ -783,8 +956,25 @@ static void main_telemetry_step(void)
  *
  * 【弱网】: 发布登记失败只打日志 —— g4_at_mqtt_publish_ex() 本身是非阻塞登记队列,
  * 而且事件不像配置应答那样必须让平台知道, 绝不能因为它去阻塞主循环。
+ *
+ * ★★2026-10-18 (丙) 三处改动★★
+ *   ① devType 参数化: 以前写死 "sensor", 于是【声光离线】也发成 devType="sensor",
+ *      平台会误以为是液位传感器掉了。现在: 液位 -> "sensor", 声光 -> "device"。
+ *   ② 4G 不在线时【入事件缓存】(EC_KIND_DEVICE) 等重连补报 —— 原来只有
+ *      event.action 会入缓存, event.device 在弱网期间直接丢; 而"声光离线"
+ *      恰恰常发生在弱网/掉线时, 丢了平台就永远不知道。
+ *   ③ 配合 lora_business 的 alarm_offline_reported: 声光恢复时补报
+ *      event.device{"online"}(见 main_on_alarm_result 的 recovered 分支)。
  */
-static void main_publish_device_event(const char *uid_hex, bool online)
+/* ★ 第 12 条(2026-09-30): 事件 msgId 的【唯一序号】—— 在线发送与"断线入缓存"
+ * 两条路【共用同一个计数器】。
+ * 【为什么必须共用】以前两边各有一个 static seq: 同一个事件在线时叫 `s001`,
+ * 断线入缓存、之后补报时被重新分配成 `b001` —— 平台按 msgId 做幂等/去重时对不上。
+ * ★2026-10-18: 定义上移到这里(main_publish_device_event 也要用它)。 */
+static uint16_t s_evt_seq;
+
+static void main_publish_device_event(const char *uid_hex, bool online,
+                                      const char *dev_type)
 {
     /* 一律 static: 栈只有 4KB(见 startup_n32h47x_48x.s 的 Stack_Size) */
     static char     data[96];
@@ -795,11 +985,50 @@ static void main_publish_device_event(const char *uid_hex, bool online)
     cjw_t           w;
     uint16_t        plen;
     uint16_t        tlen;
+    const char     *dt = ((dev_type != NULL) && (dev_type[0] != '\0'))
+                             ? dev_type : "sensor";
+    bool            is_sensor = (strcmp(dt, "sensor") == 0);
+
+    /* ---- 4G 不在线: 写进事件缓存, 重连后由补报队列发出去 ---- */
+    if (!g4_at_is_online())
+    {
+        ec_record_t rec;
+        uint8_t     uid_b[CFG_UID_BYTES];
+
+        if (!cfg_uid_to_bytes(uid_hex, uid_b))
+        {
+            log_info("[CLOUD] !! %s 不是合法 uid, 设备事件无法入缓存\r\n",
+                     (uid_hex != NULL) ? uid_hex : "(null)");
+            return;
+        }
+
+        (void)memset(&rec, 0, sizeof(rec));
+        rec.kind = (uint8_t)EC_KIND_DEVICE;
+        (void)memcpy(rec.uid, uid_b, CFG_UID_BYTES);
+        rec.a    = online ? (uint8_t)EC_DEV_EV_ONLINE : (uint8_t)EC_DEV_EV_OFFLINE;
+        rec.b    = is_sensor ? (uint8_t)EC_DEV_SENSOR : (uint8_t)EC_DEV_DEVICE;
+        rec.ts   = main_now_unix();
+        rec.seq  = 0U;                          /* 设备事件不按 seq 分组 */
+        s_evt_seq = (uint16_t)((s_evt_seq + 1u) % 1000u);
+        rec.msg_seq = s_evt_seq;                /* 与其它事件共用同一个序号计数器 */
+
+        if (event_cache_push(&rec))
+        {
+            log_info("[CLOUD] 4G 不在线 -> 设备事件(uid=%s type=%s %s)入补报缓存\r\n",
+                     (uid_hex != NULL) ? uid_hex : "?", dt,
+                     online ? "online" : "offline");
+        }
+        else
+        {
+            log_info("[CLOUD] !! 设备事件(event_cache_push 拒绝) -> 这条丢了\r\n");
+        }
+        return;
+    }
 
     cjw_init(&w, data, (uint16_t)sizeof(data));
     cjw_obj_begin(&w);
     cjw_kv_str(&w, "uid", (uid_hex != NULL) ? uid_hex : "");
-    cjw_kv_str(&w, "devType", "sensor");
+    cjw_kv_str(&w, "devType", dt);
     cjw_kv_str(&w, "event", online ? "online" : "offline");
     cjw_obj_end(&w);
     if (!cjw_ok(&w))
@@ -836,6 +1065,43 @@ static void main_publish_device_event(const char *uid_hex, bool online)
                               cloud_profile_topic_retained(CLOUD_TOPIC_EVENT)) != SYS_OK)
     {
         log_info("[CLOUD] !! 事件发布登记失败(离线/队列满), 这条事件只记在本机\r\n");
+    }
+}
+
+/**
+ * @brief 液位失联/恢复的【适配器】—— 固定 devType = "sensor"
+ *
+ * ★2026-10-18 (丙): main_publish_device_event 增加了 devType 参数, 而
+ * lora_business 的传感器回调签名只有 (uid, online) ⇒ 用这一层适配。
+ * 声光那边直接调 main_publish_device_event(..., "device"), 不走这里。
+ */
+static void main_on_sensor_event(const char *uid_hex, bool online)
+{
+    main_publish_device_event(uid_hex, online, "sensor");
+}
+
+/**
+ * @brief 出厂字段操作的结果(写成功 / 读成功 / 失败) —— 只打串口, 【不上云】
+ *
+ * ★2026-10-18: 字段是产线/开发者的内部信息(用户明确"不要让云端知道"),
+ *   所以这里既不组 JSON、也不进 event_cache, 只落一行日志。
+ */
+static void main_on_field_result(bool ok, const char *field10)
+{
+    if (!ok)
+    {
+        log_info("[FIELD] ==> 结果: 失败"
+                 "(写: 3 条都没收到 0x80 / 读: 12s 内没收到 0x08)\r\n");
+        return;
+    }
+
+    if ((field10 != NULL) && (field10[0] != 0x00))
+    {
+        log_info("[FIELD] ==> 结果: 读取成功, 设备字段 = \"%s\"\r\n", field10);
+    }
+    else
+    {
+        log_info("[FIELD] ==> 结果: 写入成功(设备已回 0x80)\r\n");
     }
 }
 
@@ -924,7 +1190,8 @@ static void main_publish_bind_event(const char *uid_hex, bool is_sensor,
  * 现在: 入缓存时就把号码记进记录(ec_record_t.msg_seq, 2 B/条), 补报时原样还原。
  * ★2026-10-08: 声明【上移到本文件靠前处】★ —— 声光动作结果(main_on_alarm_result)
  *   也要用它, 那个函数在 status_change 之前。原来它定义在下面, 编译报未声明。 */
-static uint16_t s_evt_seq;
+/* ★2026-10-18: s_evt_seq 的定义已上移到 main_publish_device_event 之前
+ *   —— 那个函数(设备在线/离线事件)现在也要入补报缓存, 需要 `msg_seq`。 */
 
 /* ==================================================================
  * event.action：声光联动【执行结果】上报（2026-10-08 用户 A1/A3）
@@ -945,7 +1212,7 @@ static uint16_t s_evt_seq;
  *   够用且不撒谎 —— failsafe 触发的动作在 manual 模式下本来也不会发。
  * ================================================================== */
 static void main_on_alarm_result(const char *uid_hex, uint8_t gear,
-                                 bool ok, bool gave_up)
+                                 bool ok, bool gave_up, bool recovered)
 {
     static char            data[192];
     static char            payload[CLOUD_RESP_MAX];
@@ -994,7 +1261,7 @@ static void main_on_alarm_result(const char *uid_hex, uint8_t gear,
     if (!g4_at_is_online())
     {
         ec_record_t rec;
-        uint8_t     uid3[3];
+        uint8_t     uid3[CFG_UID_BYTES];
 
         if (!cfg_uid_to_bytes(uid_hex, uid3))
         {
@@ -1004,7 +1271,7 @@ static void main_on_alarm_result(const char *uid_hex, uint8_t gear,
 
         (void)memset(&rec, 0, sizeof(rec));
         rec.kind = (uint8_t)EC_KIND_ACTION;
-        (void)memcpy(rec.uid, uid3, 3U);
+        (void)memcpy(rec.uid, uid3, CFG_UID_BYTES);
         rec.a    = gear;                    /* 档位 */
         rec.b    = (uint8_t)(((cfg != NULL) &&
                               (cfg->rules.mode == (uint8_t)CFG_RULE_MANUAL))
@@ -1019,10 +1286,15 @@ static void main_on_alarm_result(const char *uid_hex, uint8_t gear,
                  uid_hex, (unsigned)gear, (int)res.code);
 
         /* 离线时"设备离线"这件事同样要报 —— 平台做离线告警靠它。
-         * (它自己内部也会按在线/离线决定直发还是入缓存, 这里不用重复判断。) */
+         * ★2026-10-18 (丙): devType="device"(声光), 且它自己内部也会入缓存。 */
         if (gave_up)
         {
-            main_publish_device_event(uid_hex, false);
+            main_publish_device_event(uid_hex, false, "device");
+        }
+        /* ★2026-10-18 (丙): 之前判过离线, 这次成功 => 补报"恢复" ★ */
+        if (recovered)
+        {
+            main_publish_device_event(uid_hex, true, "device");
         }
         return;
     }
@@ -1057,11 +1329,17 @@ static void main_on_alarm_result(const char *uid_hex, uint8_t gear,
     /* ★重试用尽 ⇒ 额外报一条"设备离线"★
      * 两条都发是刻意的: event.action 给"这次动作的明细", event.device 给
      * "这台设备掉了"这个状态 —— 平台做离线告警只需要盯后者一种形状。
-     * 复用液位失联那同一个函数, 平台侧处理逻辑完全一致。 */
+     * ★2026-10-18 (丙): devType 用 "device"(声光), 不再误报成 "sensor";
+     *   并且恢复时由下面的 recovered 分支补报 event.device{"online"}。 */
     if (gave_up)
     {
         log_info("[CLOUD] !! %s 连续 3 条 0x03 都没成功 -> 补报设备离线\r\n", uid_hex);
-        main_publish_device_event(uid_hex, false);
+        main_publish_device_event(uid_hex, false, "device");
+    }
+    if (recovered)
+    {
+        log_info("[CLOUD] %s 之前判过离线, 这次 0x82 成功 -> 补报设备恢复\r\n", uid_hex);
+        main_publish_device_event(uid_hex, true, "device");
     }
 }
 /* ==================================================================
@@ -1691,9 +1969,13 @@ static void status_report(void)
     char          hb_text[16];
     char          cereg_text[24];
 
-    for (i = 0U; i < total; i++)
+    /* ★2026-10-18: 与 status.report / dev.query 统一口径(用 lora_business_device_state_bytes)
+     *   以前这里直接看 is_online —— 那是"收到过帧/绑定过"的粘滞标志, 声光断电后
+     *   仍然是 true, 于是串口显示"在线从机=1/1"而平台收到的 devicesOnline=0。
+     *   现在三处(本行、status.report、dev.query)算的是同一件事。 */
+    for (i = 0U; (i < total) && (list != NULL); i++)
     {
-        if (list[i].is_online)
+        if (lora_business_device_state_bytes(list[i].dev_uid) == LORA_DEV_STATE_ONLINE)
         {
             online_cnt++;
         }
@@ -2134,6 +2416,15 @@ static bool main_cloud_downlink_try(const char *topic, const uint8_t *data, uint
 #define MAIN_CONSOLE_JSON_DEMO \
     "{\"cmd\":\"sys.query_status\",\"msgId\":\"t1\",\"ts\":1700000000}"
 
+/** ★2026-10-18: #lorasend 用 —— 单个 hex 字符转值; 非 hex 返回 -1 */
+static int main_hex_digit(char c)
+{
+    if ((c >= '0') && (c <= '9')) { return (int)(c - '0'); }
+    if ((c >= 'a') && (c <= 'f')) { return (int)(c - 'a') + 10; }
+    if ((c >= 'A') && (c <= 'F')) { return (int)(c - 'A') + 10; }
+    return -1;
+}
+
 static void main_console_help(void)
 {
     log_info("[DIAG] #json [payload] 把下行 JSON 喂进云协议层(离线验证 P1 全链路; "
@@ -2143,6 +2434,15 @@ static void main_console_help(void)
     log_info("[DIAG] #offline 打印各液位从机的上次上报/阈值/在线状态, 并立刻跑一次失联检查\r\n");
     log_info("[DIAG] #lora 射频诊断: 回读芯片实际配置(频率/同步字/模式/IRQ/统计/BUSY) + 一句话判读; "
              "只读不改, 不打断接收\r\n");
+    log_info("[DIAG] #lorasend <hex> 空口【逐字节透传】发一串字节(不加帧头/不算 CRC), "
+             "例: #lorasend AA5501AABB\r\n");
+    log_info("[DIAG] #bind [sensor|device] [秒] 本地开绑定窗口 —— 拔掉 SIM 卡(无 4G)也能绑设备; "
+             "默认 sensor 30 秒\r\n");
+    log_info("[DIAG] #set <10字符> 空口写【设备】出厂字段(0x06 每5s一条, 最多3条); "
+             "#set self <10字符> 写网关自己的(落 Flash, 云端不可见)\r\n");
+    log_info("[DIAG] #get 空口读【设备】字段(0x07 只发一次, 等约12s; 设备会重发0x08); "
+             "#get self 打印网关自己的\r\n");
+    log_info("[DIAG] #unbind <uid> 本地解绑(与云端同一条流程: 发0x05 等设备 ack), 不需要 4G\r\n");
 }
 
 static bool main_console_ext(const char *line)
@@ -2281,10 +2581,246 @@ static bool main_console_ext(const char *line)
      *   3) 具体实现写在 lora_proto.c 的 LoraApp_DiagPrint(): 那里正是 LoRa 配置
      *      (project_config.h 的 LORA_FRE/SF/BW/CR)与 LoraApp_* 状态所在的一层。
      * 该命令【只读】: 只发 Get 类命令 + 读寄存器, 不发任何 Set/SetRx, 不打断接收。 */
-#if !MAIN_LORA_ENABLE
+#if MAIN_LORA_ENABLE
+    /* ★2026-10-18 修正: 原来这两个分支写【反了】—— MAIN_LORA_ENABLE=1(有射频)时
+     *   反而打"不可用: MAIN_LORA_ENABLE=0", 而 =0(没射频)时却去调 LoraApp_DiagPrint()。
+     *   现场表现: 串口敲 #lora 永远只回一句"不可用", 射频诊断根本调不到。 */
     if (strcmp(line, "#lora") == 0)
     {
         LoraApp_DiagPrint();
+        return true;
+    }
+
+    /* ---------------- #lorasend <hex> ----------------
+     * 空口【逐字节透传】: 把十六进制串原样从 LoRa 发出去(不加帧头/不算 CRC)。
+     *
+     * 【为什么需要它 —— 纯 LoRa 台架/拔掉 SIM 卡时】
+     *   本固件正常业务只发"协议帧"(AA55 + 网关/设备 UID + func + 数据 + CRC),
+     *   没有"随手发一串字节"的入口。而现场排障/让设备进某个状态经常需要
+     *   直接对空口喊一嗓子。lora_proto.c 里早就有 lora_proto_send_raw()
+     *   (逐字节一致 + 等 TX_DONE + 发完回 RX), 只是一直没人从控制台调它。
+     *
+     * 用法: #lorasend AA5501...        (空格/逗号随意, 非 hex 字符会被跳过)
+     * 上限: LORA_FRAME_RAW_MAX 字节(与协议帧同长, 240)。
+     * 注意: 发射期间接收是停的(半双工), 与正常业务共用同一颗射频。 */
+    if (strncmp(line, "#lorasend", 9) == 0)
+    {
+        static uint8_t buf[LORA_FRAME_RAW_MAX];   /* static: 栈只有 4 KB */
+        const char *p = line + 9;
+        uint8_t     n = 0u;
+        int         hi;
+
+        while (*p == ' ') { p++; }
+
+        while ((*p != '\0') && (n < (uint8_t)sizeof(buf)))
+        {
+            hi = main_hex_digit(*p);
+            if (hi < 0) { p++; continue; }        /* 跳过空格/逗号/其它分隔符 */
+            p++;
+            {
+                int lo = main_hex_digit(*p);
+                if (lo < 0) { break; }            /* 半字节: 不猜, 直接停 */
+                p++;
+                buf[n] = (uint8_t)(((uint32_t)hi << 4) | (uint32_t)lo);
+                n++;
+            }
+        }
+
+        if (n == 0u)
+        {
+            log_info("[TEST] #lorasend 需要 hex 参数, 例: #lorasend AA5501AABB\r\n");
+            return true;
+        }
+
+        log_info("[TEST] #lorasend 透传 %u 字节(不做任何加工)\r\n", (unsigned)n);
+        if (lora_proto_send_raw(buf, n))
+        {
+            log_info("[TEST] #lorasend 已发出\r\n");
+        }
+        else
+        {
+            log_info("[TEST] !! #lorasend 发送失败(射频忙/等 TX_DONE 超时, 详见上面 [TX-RAW] 行)\r\n");
+        }
+        return true;
+    }
+
+    /* ---------------- #bind [sensor|device] [window_s] ----------------
+     * 【本地开门绑设备 —— 拔掉 SIM 卡也能绑】
+     *
+     * 【为什么必须有】绑定走的是"设备主动发 0x04 → 网关回 0x80 → 设备回 0x80"。
+     *   但 on_frame 里那道门是:
+     *       if (g_bind.state != BIND_IDLE && func == 0x04) { 处理; }
+     *   ⇒ 【窗口没开, 0x04 直接当普通帧走白名单被丢掉】。而开窗只有一条路:
+     *     云端下发 sen.bind / dev.bind ⇒ 没有 4G 就永远开不了窗 ⇒ 绑不了。
+     *   本命令把 open_bind_window() 暴露到控制台, 于是纯 LoRa 台架也能绑。
+     *
+     * 用法: #bind                     (默认 sensor, 30 秒窗口)
+     *       #bind device 60           (声光, 60 秒)
+     * ⚠️ serial/name 留空 —— 那是平台侧的元数据, 离线时没有; 绑定后可用 cfg.set 补。
+     * ⚠️ 声光默认 dev_type=3(一体机), 需要别的类型请用云端 dev.bind 下发。 */
+    if (strncmp(line, "#bind", 5) == 0)
+    {
+        const char *p = line + 5;
+        bool        is_sensor = true;
+        unsigned    win_s     = 30u;
+
+        while (*p == ' ') { p++; }
+
+        if (strncmp(p, "device", 6) == 0)      { is_sensor = false; p += 6; }
+        else if (strncmp(p, "sensor", 6) == 0) { is_sensor = true;  p += 6; }
+
+        while (*p == ' ') { p++; }
+        if ((*p >= '0') && (*p <= '9'))
+        {
+            win_s = 0u;
+            while ((*p >= '0') && (*p <= '9'))
+            {
+                win_s = (win_s * 10u) + (unsigned)(*p - '0');
+                p++;
+            }
+        }
+        if ((win_s == 0u) || (win_s > 300u))
+        {
+            log_info("[TEST] #bind 窗口给 1~300 秒, 按 30 秒处理\r\n");
+            win_s = 30u;
+        }
+
+        if (!config_store_can_add(is_sensor))
+        {
+            log_info("[TEST] !! #bind %s 已达上限(液位≤4 / 声光≤3 / 总≤5), 先解绑再绑\r\n",
+                     is_sensor ? "液位传感器" : "声光设备");
+            return true;
+        }
+
+        if (lora_business_open_bind_window("", "", (uint16_t)win_s, is_sensor, 3u))
+        {
+            log_info("[TEST] #bind 已开窗 %us type=%s —— 现在让设备发 0x04(绑定请求)\r\n",
+                     win_s, is_sensor ? "sensor" : "device");
+            log_info("[TEST] #bind 成功后会打 [BIND] ... 绑定成功; 失败/断链看 [BIND] !! 行\r\n");
+        }
+        else
+        {
+            log_info("[TEST] !! #bind 开窗失败(已有窗口在进行? 看 [BIND] 日志)\r\n");
+        }
+        return true;
+    }
+
+    /* ---------------- #set <10字符> / #set self <10字符> ----------------
+     * 【产线专用: 写出厂字段, 全程本地, 云端不可见】
+     *   #set YA26420001      -> 经空口写进设备(0x06, 每 5 秒一条, 最多 3 条)
+     *   #set self WANGGUAN00 -> 写网关自己的字段(落 param_save, 不进 config_store)
+     * 只校验"长度 == 10", 字符集/首字母【不校验】(用户要求)。
+     * 目标设备 = 从机表里唯一那台(产线一次只接一台)。 */
+    if (strncmp(line, "#set", 4) == 0)
+    {
+        const char *p = line + 4;
+
+        while (*p == ' ') { p++; }
+
+        /* #set self <10字符> */
+        if ((strncmp(p, "self", 4) == 0) && ((p[4] == ' ') || (p[4] == '\0')))
+        {
+            device_param_t *dp;
+            uint8_t         k;
+
+            p += 4;
+            while (*p == ' ') { p++; }
+
+            if (strlen(p) != (size_t)PARAM_FIELD_LEN)
+            {
+                log_info("[FIELD] !! #set self 需要恰好 %u 字节, 例: #set self WANGGUAN00\r\n",
+                         (unsigned)PARAM_FIELD_LEN);
+                return true;
+            }
+
+            dp = param_get_ptr();
+            if (dp == NULL)
+            {
+                log_info("[FIELD] !! 参数区不可用, 写不了\r\n");
+                return true;
+            }
+            for (k = 0u; k < (uint8_t)PARAM_FIELD_LEN; k++) { dp->field[k] = p[k]; }
+            dp->field[PARAM_FIELD_LEN] = '\0';
+
+            if (param_save_store() == 0)
+            {
+                log_info("[FIELD] ★网关自身字段已落盘 = \"%s\"\r\n", dp->field);
+            }
+            else
+            {
+                log_info("[FIELD] !! 字段已改到 RAM, 但落 Flash 失败(重启会丢)\r\n");
+            }
+            return true;
+        }
+
+        /* #set <10字符> -> 写设备 */
+        if (strlen(p) != (size_t)LORA_FIELD_LEN)
+        {
+            log_info("[FIELD] !! #set 需要恰好 %u 字节, 例: #set YA26420001\r\n",
+                     (unsigned)LORA_FIELD_LEN);
+            return true;
+        }
+        if (!lora_business_field_write_begin(p))
+        {
+            log_info("[FIELD] !! 写字段没启动(原因见上一行)\r\n");
+        }
+        return true;
+    }
+
+    /* ---------------- #get / #get self ----------------
+     *   #get        -> 发 0x07 读【设备】的字段(0x07 只发一次, 等约 12 秒)
+     *   #get self   -> 打印【网关自己】的字段(从 RAM, 不碰空口) */
+    if (strncmp(line, "#get", 4) == 0)
+    {
+        const char *p = line + 4;
+
+        while (*p == ' ') { p++; }
+
+        if (strncmp(p, "self", 4) == 0)
+        {
+            device_param_t *dp = param_get_ptr();
+
+            log_info("[FIELD] 网关自身字段 = \"%s\"\r\n",
+                     (dp != NULL) ? dp->field : "(参数区不可用)");
+            return true;
+        }
+
+        if (!lora_business_field_read_begin())
+        {
+            log_info("[FIELD] !! 读字段没启动(原因见上一行)\r\n");
+        }
+        return true;
+    }
+
+    /* ---------------- #unbind <uid> ----------------
+     * 走【和云端完全一样】的解绑流程(用户要求: 不要变复杂):
+     *   lora_business_unbind() -> 发 0x05 -> 等设备 ack -> 删 config_store + 从机表。
+     * 不提供"强制删"的旁路。
+     * ⚠️ 离线也能用: 整条流程只走空口, 不需要 4G。
+     * ⚠️ 解绑【不碰出厂字段】—— 字段是出厂编号, 解绑后必须还在(用户已确认设备侧同步)。 */
+    if (strncmp(line, "#unbind", 7) == 0)
+    {
+        const char *p = line + 7;
+        char        uid[CFG_UID_STR_MAX];
+        int         rc;
+
+        while (*p == ' ') { p++; }
+        if (*p == '\0')
+        {
+            log_info("[FIELD] !! #unbind 需要 uid, 例: #unbind 21000000000000000000000001\r\n");
+            return true;
+        }
+
+        (void)snprintf(uid, sizeof(uid), "%s", p);
+        rc = lora_business_unbind(uid);
+        if (rc == 0)
+        {
+            log_info("[FIELD] 解绑流程已发起(等设备 ack, 与云端解绑同一条路)\r\n");
+        }
+        else
+        {
+            log_info("[FIELD] !! 解绑没发起 rc=%d (uid 不在从机表 / 已有解绑在进行)\r\n", rc);
+        }
         return true;
     }
 #else
@@ -2991,8 +3527,21 @@ static void pairing_run(void)
 #endif /* MAIN_MODE_PAIRING */
 
 /* ==================== main ==================== */
+/* ★2026-10-18: 把厂商的 GetUID() 包装成 param_save 要的 12 字节形式。
+ * GetUID(uint8_t*) 填 12 字节(96 位, 3 个 32 位字小端) —— 正好是我们要的。 */
+static void main_read_chip_uid(uint8_t out[12])
+{
+    GetUID(out);
+}
+
 int main(void)
 {
+    /* ★2026-10-18: 必须在任何 param_save 使用之前注册 —— 出厂默认的 gw_uid
+     * 就是靠这个 hook 填入芯片 96 位 UID 的(main.c 拿不到 UID 的话,
+     * 网关发出的帧里 gw_uid 后 12 字节会是 0, 设备端会认为不是本网关)。 */
+    param_save_set_uid_hook(main_read_chip_uid);
+    /* 2026-10-18 (甲): 出厂 gwId / clientId 也用它 => 26 位 hex(主题 rt/gw/<26位>/... ) */
+    config_store_set_uid_hook(main_read_chip_uid);
 #if (MAIN_MODE_LORA_TEST != 0) || (MAIN_MODE_PAIRING != 0)
     /* ★ 2026-09-28: 把"4G 断电"提到【main 的第一件事】★
      * 原因(见 bsp_gpio.h:155): MCU 复位后 PA8 是【输入悬空】, 而本板【悬空 = 给模组上电】
@@ -3162,7 +3711,7 @@ int main(void)
     {
         const config_store_t *cfg = config_store_get();
         const char *dev_id = ((cfg != NULL) && (cfg->system.gw_id[0] != '\0'))
-                                 ? cfg->system.gw_id : "110001";
+                                 ? cfg->system.gw_id : "11000000000000000000000000";   /* 2026-10-18: 兜底也 26 位 */
 
         /* (1) ★先把遗留档位迁移到文档档位★
          * Flash(param_save 页)里可能存着旧固件写下的 LOCAL 档(mod/cmd ...),
@@ -3329,7 +3878,15 @@ int main(void)
     /* 液位失联/恢复事件: lora_business 只负责"什么时候该报"(判定+跳变去重),
      * 真正的组 JSON + 发 event topic 在本文件的 main_publish_device_event()。
      * 这样 LoRa 业务层不用依赖云协议层, 主机测试也就不用为它造 4G 桩。 */
-    lora_business_set_sensor_event_cb(main_publish_device_event);
+    lora_business_set_sensor_event_cb(main_on_sensor_event);   /* 2026-10-18: 经适配器固定 devType="sensor" */
+
+    /* ★2026-10-18: 每次液位上报(0x02)都通知一次 —— 4G 离线时存进
+     *   telemetry_cache, 重连后按原时间戳逐条补报(用户口径: 补的是"每次上报",
+     *   不是 30s 聚合遥测)。在线时这个回调直接返回, 不影响原有遥测。 */
+    lora_business_set_level_report_cb(main_on_level_report);
+
+    /* *2026-10-18: 出厂字段(0x06/0x07)的结果回调 —— 只打串口, 不上云 */
+    lora_business_set_field_result_cb(main_on_field_result);
     log_info("[BOOT] 液位失联事件回调已挂载(event.device -> event topic)\r\n");
 #endif
     log_info("[BOOT] MQTT 下行回调 = lora_mqtt_recv_cb, 前置过滤器 = 云协议层(JSON)\r\n");
@@ -3604,6 +4161,11 @@ int main(void)
             /* ---- 断线补报: 每次最多补一页(16 条), 缓存空了立刻返回 (v70) ---- */
             main_backfill_poll();
 
+            /* ---- ★2026-10-18: 逐条液位上报的补报(一次一条) ----
+             * 与上面的"事件补报"分开跑: 两者缓存不同、topic 不同。
+             * 先事件后遥测 —— 事件量小、时效性强; 平台侧各自按 ts 排序。 */
+            main_telemetry_backfill_poll();
+
 #if MAIN_LORA_ENABLE
             /* ---- 液位失联检测的【定时兜底腿】(2026-09-27 用户拍板加) ----
              * 【为什么光有"上报驱动"不够】原口径是"每收到一路液位上报就顺带检查
@@ -3614,6 +4176,10 @@ int main(void)
              * check 函数是幂等的(只在"在线->失联"跳变时发一次事件), 每秒调用不会
              * 造成重复上报; 上报驱动那条腿保留不动, 两条腿互为补充。 */
             lora_business_check_sensor_offline();
+
+            /* *2026-10-18: 出厂字段操作(0x06 重发 / 0x07 超时)推进
+             * 1 秒粒度足够: 写字段要 5s 才补发一条, 读字段要等 12s。 */
+            lora_business_field_poll();
 #endif
 
 #if MAIN_HEARTBEAT_LED

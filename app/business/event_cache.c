@@ -1,4 +1,8 @@
 #include "event_cache.h"
+
+/* 2026-10-18: UID 尺寸静态断言 —— 防"改长度忘改缓冲"(现场踩过, 见 lora_business.c 的说明) */
+_Static_assert(sizeof(((ec_record_t *)0)->uid) == 13u,
+               "ec_record_t.uid 必须 13 字节");
 #include <string.h>
 
 static ec_record_t g_ev[EVENT_CACHE_MAX];
@@ -132,7 +136,7 @@ uint8_t event_cache_group_at(uint16_t idx, ec_action_pair_t *out, uint8_t max_pa
            (ev_at((uint16_t)(idx + n))->kind == (uint8_t)EC_KIND_ACTION) &&
            (ev_at((uint16_t)(idx + n))->seq == seq))
     {
-        (void)memcpy(out[n].uid, ev_at((uint16_t)(idx + n))->uid, 3u);
+        (void)memcpy(out[n].uid, ev_at((uint16_t)(idx + n))->uid, sizeof(out[n].uid));
         out[n].code = ec_action_code_of(ev_at((uint16_t)(idx + n)));
         n++;
     }

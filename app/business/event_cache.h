@@ -118,7 +118,7 @@ typedef struct
     uint8_t  a;             /* 见上面每种 kind 的说明 */
     uint8_t  b;             /* 见上面每种 kind 的说明 */
     uint8_t  seq;           /* 同一次动作的多条结果共用; 0 = 不分组 */
-    uint8_t  uid[3];        /* 关联设备 3 字节 uid; 无关联填 0 */
+    uint8_t  uid[13];        /* 关联设备 13 字节 uid; 无关联填 0 */
     uint16_t msg_seq;       /* ★ 第 12 条: 该事件 msgId 的【三位序号部分】 ★
                              * 前缀由 kind 推出(s status_change / v device),
                              * 补报时重建出的 id 与首次分配时逐字节一致。
@@ -195,7 +195,7 @@ bool event_cache_validate(const ec_record_t *rec);
  * ★ EC_KIND_ACTION 的字段复用（v64 明确下来，别让接线时再踩）★
  * ==========================================================================
  * 一次联动动作会产生【每台设备一条记录】:
- *     uid   = 该设备(3 字节)      a = 档位 gear        b = 触发来源 trigger
+ *     uid   = 该设备(13 字节)      a = 档位 gear        b = 触发来源 trigger
  *     seq   = 同一次动作共用      ts = 动作发生时刻
  * 但 results[] 需要的是 (uid, **执行码**) 成对 —— 而 16 B 的记录里
  * **没有给执行码留独立字段**。对动作事件而言 `level_mm` 本来就是空的
@@ -217,7 +217,7 @@ void ec_action_set_code(ec_record_t *rec, int32_t code);
 /** 一台设备的动作执行结果(渲染 event.action 的 results[] 时用) */
 typedef struct
 {
-    uint8_t uid[3];
+    uint8_t uid[13];
     int32_t code;
 } ec_action_pair_t;
 

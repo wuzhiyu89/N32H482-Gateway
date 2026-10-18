@@ -645,7 +645,7 @@ uint16_t cloud_proto_render_cached_event(char *out, uint16_t cap,
             {
                 return 0u;
             }
-            cfg_uid_from_bytes(rec->uid, uid_hex);   /* 3 字节 -> hex 串 */
+            cfg_uid_from_bytes(rec->uid, uid_hex);   /* 13 字节 -> 26 位 hex 串 */
             de.uid      = uid_hex;
             de.dev_type = typ;
             de.event    = ev;
@@ -1523,7 +1523,7 @@ static void cloud_inject_last_values(cJSON *arr, bool with_level)
     for (it = arr->child; it != NULL; it = it->next)
     {
         cJSON       *u;
-        uint8_t      uid[3];
+        uint8_t      uid[CFG_UID_BYTES];
         last_value_t v;
 
         if (it->type != cJSON_Object)
@@ -1553,6 +1553,14 @@ static void cloud_inject_last_values(cJSON *arr, bool with_level)
             {
                 is_on = ((uint32_t)(get_tick_ms() - v.rx_tick_ms)
                          < sensor_offline_threshold_ms(period_s));
+            }
+            else
+            {
+                /* ★2026-10-18: 没有快照(声光从不发 0x02, 永远不进快照表)
+                 *   => 问业务层的真实状态。声光按"是否被判过离线"算,
+                 *      否则它的 online 会恒为 false, 平台一直误报掉线。 */
+                is_on = (lora_business_device_state(u->valuestring)
+                         == LORA_DEV_STATE_ONLINE);
             }
             (void)cJSON_AddBoolToObject(it, "online", is_on ? 1 : 0);
             if (!have)

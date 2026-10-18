@@ -48,8 +48,15 @@ Thumbs.db
 
 # Logs
 *.log
-log/
+/log/
 
 # Temp
 *.tmp
 *~
+
+# Host test binaries (built by _host_test/run.ps1)
+_host_test/*.exe
+
+# OTA host-test fixture: must be exactly these bytes (test_md5/test_ota_http
+# assert its size + MD5), so it is tracked despite the *.bin rule above.
+!_ota_platform_test/fw_test.bin

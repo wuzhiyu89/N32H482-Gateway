@@ -18,7 +18,7 @@ typedef enum
  */
 typedef struct
 {
-    uint8_t         dev_uid[3];         //目标从机UID【修改：3字节】
+    uint8_t         dev_uid[13];         // 目标从机 UID(13 字节: 类型 + 96 位芯片 UID)
     slave_type_t    dev_type;           //设备类型
     uint8_t         payload[211];       /* 原始待下发报文: 1 字节 func + 最多 210 字节载荷
                                          * ★2026-10-08: 64 -> 211★ 联动 0x03 载荷从 63 涨到 210

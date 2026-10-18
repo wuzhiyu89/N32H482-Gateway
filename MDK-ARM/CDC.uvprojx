@@ -314,7 +314,7 @@
           </ArmAdsMisc>
           <Cads>
             <interw>1</interw>
-            <Optim>7</Optim>
+            <Optim>2</Optim>
             <oTime>0</oTime>
             <SplitLS>0</SplitLS>
             <OneElfS>1</OneElfS>
@@ -638,6 +638,11 @@
               <FileName>event_cache.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\app\business\event_cache.c</FilePath>
+            </File>
+            <File>
+              <FileName>telemetry_cache.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\business\telemetry_cache.c</FilePath>
             </File>
             <File>
               <FileName>event_cache.h</FileName>
@@ -1570,6 +1575,11 @@
               <FileName>event_cache.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\app\business\event_cache.c</FilePath>
+            </File>
+            <File>
+              <FileName>telemetry_cache.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\business\telemetry_cache.c</FilePath>
             </File>
             <File>
               <FileName>event_cache.h</FileName>

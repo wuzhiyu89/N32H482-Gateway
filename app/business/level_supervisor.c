@@ -94,7 +94,7 @@ void level_supervisor_poll(const config_store_t *cfg, uint32_t now_ms,
         for (i = 0u; (i < cfg->sensor_count) && (i < (uint8_t)CFG_SENSOR_MAX); i++)
         {
             const cfg_sensor_t *s = &cfg->sensors[i];
-            uint8_t      uid[3];
+            uint8_t      uid[CFG_UID_BYTES];
             last_value_t v;
 
             if (s->enabled == 0u)               { continue; }
@@ -154,7 +154,7 @@ void level_supervisor_poll(const config_store_t *cfg, uint32_t now_ms,
     {
         const cfg_sensor_t *s = &cfg->sensors[i];
         last_value_t        v;
-        uint8_t             uid[3];
+        uint8_t             uid[CFG_UID_BYTES];
 
         levels[i] = 0;
         select[i] = 0u;

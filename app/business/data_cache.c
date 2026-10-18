@@ -54,9 +54,9 @@ int data_cache_down_push(uint8_t *uid, slave_type_t dev_type, uint8_t *buf, uint
     /* 先判断该uid是否已经存在待下发条目，存在则覆盖旧的 */
     for(uint8_t i = 0; i < DATA_CACHE_DOWN_MAX_ITEM; i++)
     {
-        if(g_cache_down_buf[i].valid == true && (memcmp(g_cache_down_buf[i].dev_uid, uid, 3U) == 0))
+        if(g_cache_down_buf[i].valid == true && (memcmp(g_cache_down_buf[i].dev_uid, uid, sizeof(((last_value_t*)0)->uid)) == 0))
         {
-            memcpy(g_cache_down_buf[i].dev_uid, uid,3U);
+            memcpy(g_cache_down_buf[i].dev_uid, uid, sizeof(((last_value_t*)0)->uid));
             g_cache_down_buf[i].dev_type = dev_type;
             memcpy(g_cache_down_buf[i].payload, buf, len);
             g_cache_down_buf[i].pay_len = len;
@@ -69,7 +69,7 @@ int data_cache_down_push(uint8_t *uid, slave_type_t dev_type, uint8_t *buf, uint
     {
         if(g_cache_down_buf[i].valid == false)
         {
-            memcpy(g_cache_down_buf[i].dev_uid, uid,3U);
+            memcpy(g_cache_down_buf[i].dev_uid, uid, sizeof(((last_value_t*)0)->uid));
             g_cache_down_buf[i].dev_type = dev_type;
             memcpy(g_cache_down_buf[i].payload, buf, len);
             g_cache_down_buf[i].pay_len = len;
@@ -84,7 +84,7 @@ bool data_cache_down_fetch_by_uid(uint8_t *uid, cache_down_item_t *out_item)
 {
     for(uint8_t i = 0; i < DATA_CACHE_DOWN_MAX_ITEM; i++)
     {
-        if(g_cache_down_buf[i].valid == true && (memcmp(g_cache_down_buf[i].dev_uid, uid,3U)==0))
+        if(g_cache_down_buf[i].valid == true && (memcmp(g_cache_down_buf[i].dev_uid, uid, sizeof(((last_value_t*)0)->uid))==0))
         {
             memcpy(out_item, &g_cache_down_buf[i], sizeof(cache_down_item_t));
             return true;
@@ -97,7 +97,7 @@ void data_cache_down_del_by_uid(uint8_t *uid)
 {
     for(uint8_t i = 0; i < DATA_CACHE_DOWN_MAX_ITEM; i++)
     {
-        if(g_cache_down_buf[i].valid == true && (memcmp(g_cache_down_buf[i].dev_uid, uid,3U)==0))
+        if(g_cache_down_buf[i].valid == true && (memcmp(g_cache_down_buf[i].dev_uid, uid, sizeof(((last_value_t*)0)->uid))==0))
         {
             memset(&g_cache_down_buf[i],0,sizeof(cache_down_item_t));
             g_cache_down_buf[i].valid = false;

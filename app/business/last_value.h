@@ -39,7 +39,7 @@
 typedef struct
 {
     bool     used;          /* 槽位是否有效 */
-    uint8_t  uid[3];        /* 设备 3 字节 uid */
+    uint8_t  uid[13];        /* 设备 13 字节 uid */
     uint16_t level_mm;      /* 最近水位(mm) —— 与 level_eval 同口径 */
     uint16_t bat_pct;       /* 电量百分比。★注意: 上游参数名叫 bat_mv 但传的是百分比
                              *   (lora_business.c 里 `bat_pct`), 文档口径也是百分比 */
@@ -58,6 +58,23 @@ typedef struct
 void last_value_reset(void);
 
 /**
+ * @brief 丢掉【某一个 UID】的快照 —— 重绑设备时用（2026-10-14 新增）
+ * @param uid 13 字节设备 uid, 不可为 NULL
+ * @return 清掉的槽数: 0 = 该 UID 本来就没有快照(不算错); 1 = 清了一条
+ * @note  【为什么要它】用户场景: 设备坏了换新, 重新烧录后回到同一默认地址
+ *        ⇒ 允许同 UID 再绑一次(从机表不新增), 但【新设备不该继承旧设备的历史值】:
+ *          否则新设备还没上报时, sen.query 就回旧设备的水位; level_supervisor
+ *          会用旧水位算档位(新设备一上电就按旧水位点灯); 失联判定也可能因
+ *          "缓存里的 rx_tick_ms 很新"而误判在线。
+ *        ⚠️【不要】图省事改用 last_value_reset() —— 那是【全清】, 重绑一台会把
+ *           其它所有传感器的快照一起清掉(现场表现: 重绑一台, 其它台全掉线)。
+ *        ⚠️【不要】用 config_store_unbind_device() 走"先解绑再绑" —— 它会连带
+ *           清掉 gears[].target_uid 里指向该 UID 的条目(见 config_store.h),
+ *           那台设备以后收不到联动指令(能绑定、能上报, 就是不动灯)。
+ */
+uint8_t last_value_clear_uid(const uint8_t *uid);
+
+/**
  * @brief 注册"网关当前 Unix 秒"的取值函数(由 main.c 注册 main_now_unix)
  * @param fn 取值函数; 传 NULL 表示撤销注册
  * @note  不注册时 last_value_update() 把 rx_unix 记 0 —— 应答里就【不输出】
@@ -68,7 +85,7 @@ void last_value_set_now_hook(uint32_t (*fn)(void));
 
 /**
  * @brief 记录/更新某设备的最后值(内部按 uid 覆盖)
- * @param uid        3 字节设备 uid, 不可为 NULL
+ * @param uid        13 字节设备 uid, 不可为 NULL
  * @param level_mm   水位(mm)
  * @param bat_pct    电量百分比 0~100
  * @param time_mdhhm 设备端时间(MD.DD.HH.MM 原样保存)

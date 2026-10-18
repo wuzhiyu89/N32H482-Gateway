@@ -1,4 +1,8 @@
 #include "last_value.h"
+
+/* 2026-10-18: UID 尺寸静态断言 —— 防"改长度忘改缓冲"(现场踩过, 见 lora_business.c 的说明) */
+_Static_assert(sizeof(((last_value_t *)0)->uid) == 13u,
+               "last_value_t.uid 必须 13 字节");
 #include <string.h>
 
 /* 纯内存快照表; 断电即失(见 last_value.h 顶部说明) */
@@ -18,13 +22,49 @@ void last_value_reset(void)
     g_evict = 0U;
 }
 
+/* 前向声明: lv_find() 定义在下面, 而 last_value_clear_uid() 要用它。
+ * (2026-10-14: 第一版直接调用, 编译报 "implicit declaration of lv_find" +
+ *  "static declaration follows non-static declaration" —— 加这一行即可。) */
+static int lv_find(const uint8_t *uid);
+
+/* ★★2026-10-14 新增: 只丢【某一个 UID】的快照 —— 重绑设备时用 ★★
+ * --------------------------------------------------------------------------
+ * 【为什么要它】用户 2026-10-14 场景: 设备坏了换新, 重新烧录后回到同一默认地址
+ *   ⇒ 允许同 UID 再绑一次(从机表不新增), 但【新设备不该继承旧设备的历史值】。
+ *   不继承的理由: 否则新设备还没上报时, sen.query 就回旧设备的水位;
+ *   level_supervisor 会拿旧水位算档位(新设备一上电就按旧水位点灯/播报);
+ *   失联判定还可能因"缓存里的 rx_tick_ms 很新"而误判在线。
+ *
+ * 【为什么不用 last_value_reset()】那是【全清】—— 重绑一台会把其它所有传感器的
+ *   快照一起清掉, 现场表现是"重绑一台, 其它台全掉线"。这个函数只动目标 UID。
+ *
+ * 【为什么不用 config_store_unbind_device() 走"先解绑再绑"】它会连带清理
+ *   gears[].target_uid 里指向该 UID 的条目(见 config_store.h 的说明)
+ *   ⇒ 那台设备以后收不到联动指令(能绑定、能上报, 就是不动灯 —— 极难查)。
+ *
+ * @return 清掉的槽数: 0 = 该 UID 本来就没有快照(不算错); 1 = 清了一条 */
+uint8_t last_value_clear_uid(const uint8_t *uid)
+{
+    int i;
+
+    if (uid == NULL) { return 0U; }
+
+    i = lv_find(uid);
+    if (i < 0) { return 0U; }               /* 本来就没有 -> 无害 */
+
+    (void)memset(&g_last[i], 0, sizeof(g_last[i]));
+    /* ⚠️ 刻意【不】动 g_evict / g_upd_seq: 它们是全局统计量, 与单个设备无关
+     *   (g_upd_seq 按设计就不被 reset 清零, 见它的注释)。 */
+    return 1U;
+}
+
 /* 按 uid 找槽位; 返回裸槽下标, 未找到 -1 */
 static int lv_find(const uint8_t *uid)
 {
     uint8_t i;
     for (i = 0U; i < LAST_VALUE_MAX; i++)
     {
-        if ((g_last[i].used == true) && (memcmp(g_last[i].uid, uid, 3U) == 0))
+        if ((g_last[i].used == true) && (memcmp(g_last[i].uid, uid, sizeof(((last_value_t*)0)->uid)) == 0))
         {
             return (int)i;
         }
@@ -99,7 +139,7 @@ bool last_value_update_ex(const uint8_t *uid, uint16_t level_mm, uint16_t bat_pc
             g_evict++;
         }
         memset(&g_last[idx], 0, sizeof(last_value_t));
-        memcpy(g_last[idx].uid, uid, 3U);
+        memcpy(g_last[idx].uid, uid, sizeof(((last_value_t*)0)->uid));
         g_last[idx].used = true;
     }
 

@@ -43,6 +43,19 @@
 #include "sensor_offline.h"    /* 液位失联判定的纯逻辑(用户补充要求第 3 条) */
 #include "cloud_proto.h"       /* P5 绑定/解绑: cloud_proto_get_now_ts() 用于 config_store 落盘时间戳 */
 #include "level_eval.h"        /* 档位联动: level_gear_*() —— 组帧/选目标是纯逻辑, 在那边单测 */
+/* 2026-10-14: 重绑设备时清该 UID 的历史快照(last_value_clear_uid) —— 新设备不继承旧值 */
+#include "last_value.h"
+
+/* ★★2026-10-18: UID 长度只有一个真相源 ★★
+ * 同一件事在三个头文件里各有一个宏(因为它们互相不 include, 避免循环依赖):
+ *     config_store.h : CFG_UID_BYTES     = 13
+ *     param_save.h   : PARAM_UID_BYTES   = 13
+ *     lora_proto.h   : LORA_UID_BYTES    = 13
+ * ⇒ 这里(同时能看到 CFG_UID_BYTES 与 LORA_UID_BYTES 的唯一地方)用静态断言钉住,
+ *   将来谁只改一处、忘了另外两处, 【编译就失败】, 而不是让帧悄悄错位。
+ *   (param_save 那个宏在 param_save.c 里另有一条断言盯着 —— 那文件看不到 config_store.h。) */
+_Static_assert(CFG_UID_BYTES == LORA_UID_BYTES,
+               "CFG_UID_BYTES and LORA_UID_BYTES must match");
 #include "g4_urc.h"
 #include "g4_at.h"
 #include "bsp_tim.h"
@@ -61,7 +74,7 @@ static lora_slave_t g_slave_list[LORA_SLAVE_MAX];
 static uint8_t      g_slave_count = 0U;
 static uint32_t g_last_poll_tick;
 /* 网关 UID 在 lora_business_init 里从 param_save 读入 (支持后续本地/云端修改) */
-static uint8_t g_gw_uid[3];
+static uint8_t g_gw_uid[CFG_UID_BYTES];
 
 /* ========== 内部: 设备绑定窗口状态机(P5, LoRa 0x04) ==========
  *
@@ -99,7 +112,7 @@ static struct
     bool         is_sensor;          /* sen.bind=true 液位 / dev.bind=false 声光 */
     uint8_t      dev_type;           /* ★ 第 11 条: dev.bind 给的联动设备类型
                                       * (cfg_dev_type_t 1/2/3); sen.bind 时无意义 */
-    uint8_t      pending_uid[3];     /* 发起绑定的设备地址(收到 0x04 后登记) */
+    uint8_t      pending_uid[CFG_UID_BYTES];     /* 发起绑定的设备地址(收到 0x04 后登记) */
 } g_bind;
 
 /* ========== 解绑两阶段状态机(2026-09-30 用户最终口径) ==========
@@ -135,7 +148,7 @@ typedef enum
 static struct
 {
     unbind_state_t state;
-    uint8_t        uid[3];            /* 解绑目标设备 UID(3B) */
+    uint8_t        uid[CFG_UID_BYTES];            /* 解绑目标设备 UID(13B) */
     bool           is_sensor;         /* 设备类型(sensor=true / alarm=false), 用于事件回调 */
     uint8_t        slave_idx;         /* 从机表索引(0xFF = 无效); 解绑期间作"锁"用 */
     uint32_t       phase_start_tick;  /* 当前阶段开始 tick */
@@ -258,7 +271,7 @@ static uint16_t _hex_bin2str(const uint8_t *in, uint16_t in_len, char *out, uint
 #define LORA_UID_TYPE_LEVEL   2U
 #define LORA_UID_TYPE_ALARM   3U
 
-static uint8_t _dev_type_of_uid(const uint8_t uid[3])
+static uint8_t _dev_type_of_uid(const uint8_t uid[CFG_UID_BYTES])
 {
     return (uint8_t)(uid[0] >> 4);
 }
@@ -270,11 +283,11 @@ static uint8_t _dev_type_of_uid(const uint8_t uid[3])
 /* ---------- 从机查找 ----------
  * 【只按地址匹配, 不看 is_online】: 在不在线都要能找到, 否则云端刚下发的指令
  * 会因为设备"暂时离线"而找不到目标被丢掉。 */
-static uint8_t _find_slave(const uint8_t uid[3])
+static uint8_t _find_slave(const uint8_t uid[CFG_UID_BYTES])
 {
     for (uint8_t i = 0U; i < g_slave_count; i++)
     {
-        if (memcmp(g_slave_list[i].dev_uid, uid, 3U) == 0)
+        if (memcmp(g_slave_list[i].dev_uid, uid, CFG_UID_BYTES) == 0)
         {
             return i;
         }
@@ -288,7 +301,7 @@ static uint8_t _find_slave(const uint8_t uid[3])
  * ⚠【这里故意不碰 last_report_tick】: 本函数对【任何】帧(含 0x80/0x81 ACK)都调用,
  *   而失联检测要的是"上次【液位上报】时间"。假如在这里顺手更新它, 一台只回 ACK、
  *   再也不上报的液位设备就会被永远当成"刚上报过", 失联事件永远发不出来。 */
-static uint8_t _touch_slave(const uint8_t uid[3])
+static uint8_t _touch_slave(const uint8_t uid[CFG_UID_BYTES])
 {
     uint8_t idx = _find_slave(uid);
     if (idx == 0xFFU) return idx;
@@ -301,7 +314,7 @@ static uint8_t _touch_slave(const uint8_t uid[3])
  * 由绑定流程在收到 0x04 广播帧且网关回了 ACK、设备也回 ACK 确认后调用。
  * 容量约束(总数≤5/液位≤4/声光≤3)由调用前 config_store_can_add 兜底,
  * 这里只保证 RAM 表不越界、不重复。返回索引; -1=表满/重复。 */
-static int _slave_table_add(const uint8_t uid[3], slave_type_t type)
+static int _slave_table_add(const uint8_t uid[CFG_UID_BYTES], slave_type_t type)
 {
     if (g_slave_count >= LORA_SLAVE_MAX) return -1;
     if (_find_slave(uid) != 0xFFU)       return -1;   /* 已在表里 */
@@ -309,7 +322,7 @@ static int _slave_table_add(const uint8_t uid[3], slave_type_t type)
     uint8_t idx = g_slave_count;
     lora_slave_t *s = &g_slave_list[idx];
     memset(s, 0, sizeof(*s));
-    memcpy(s->dev_uid, uid, 3U);
+    memcpy(s->dev_uid, uid, CFG_UID_BYTES);
     s->dev_type  = type;
     s->state     = SLAVE_STATE_IDLE;
     s->is_online = true;                          /* 绑定当场就在线 */
@@ -321,7 +334,7 @@ static int _slave_table_add(const uint8_t uid[3], slave_type_t type)
 /* ---------- _slave_table_del: 删除指定地址的从机 ----------
  * 把末尾元素前移填补空洞, 保持数组紧凑。由解绑流程在收到 0x80 ACK(对 0x05)
  * 或重试耗尽后调用。返回 0=成功; -1=不在表里。 */
-static int _slave_table_del(const uint8_t uid[3])
+static int _slave_table_del(const uint8_t uid[CFG_UID_BYTES])
 {
     uint8_t idx = _find_slave(uid);
     if (idx == 0xFFU) return -1;
@@ -340,7 +353,7 @@ static int _slave_table_del(const uint8_t uid[3])
 
 /* ---------- 从 config_store 装载运行期表(init 时调一次) ----------
  * config_store 里的 sensors[](液位) 和 devices[](声光等联动设备) 是真相源,
- * 这里把它们的 uid 解成 3 字节填进 g_slave_list。
+ * 这里把它们的 uid 解成 13 字节填进 g_slave_list。
  * 顺序: 先 sensors 再 devices, 与 _slave_table_add 的末尾追加语义一致。 */
 static void _slave_table_load(void)
 {
@@ -354,10 +367,10 @@ static void _slave_table_load(void)
     for (i = 0U; i < cfg->sensor_count && i < CFG_SENSOR_MAX; i++)
     {
         if (g_slave_count >= LORA_SLAVE_MAX) break;
-        uint8_t uid3[3];
+        uint8_t uid3[CFG_UID_BYTES];
         if (!cfg_uid_to_bytes(cfg->sensors[i].uid, uid3)) continue;
         lora_slave_t *s = &g_slave_list[g_slave_count];
-        memcpy(s->dev_uid, uid3, 3U);
+        memcpy(s->dev_uid, uid3, CFG_UID_BYTES);
         s->dev_type  = SLAVE_TYPE_SENSOR;
         s->state     = SLAVE_STATE_IDLE;
         s->is_online = false;
@@ -368,10 +381,10 @@ static void _slave_table_load(void)
     for (i = 0U; i < cfg->device_count && i < CFG_DEVICE_MAX; i++)
     {
         if (g_slave_count >= LORA_SLAVE_MAX) break;
-        uint8_t uid3[3];
+        uint8_t uid3[CFG_UID_BYTES];
         if (!cfg_uid_to_bytes(cfg->devices[i].uid, uid3)) continue;
         lora_slave_t *s = &g_slave_list[g_slave_count];
-        memcpy(s->dev_uid, uid3, 3U);
+        memcpy(s->dev_uid, uid3, CFG_UID_BYTES);
         s->dev_type  = SLAVE_TYPE_ALARM_OUT;
         s->state     = SLAVE_STATE_IDLE;
         s->is_online = false;
@@ -459,7 +472,7 @@ static void _bind_handle_0x04(const lora_frame_t *frame)
     }
 
     /* 登记 pending_uid → 转入 WAIT_DEV_ACK → 立即发 0x80 */
-    memcpy(g_bind.pending_uid, frame->dev_uid, 3U);
+    memcpy(g_bind.pending_uid, frame->dev_uid, CFG_UID_BYTES);
     g_bind.state = BIND_WAIT_DEV_ACK;
     log_info("[BIND] 收到 %02X%02X%02X 的 0x04 绑定请求(type=%s), 进入 WAIT_DEV_ACK\r\n",
              g_bind.pending_uid[0], g_bind.pending_uid[1], g_bind.pending_uid[2],
@@ -471,7 +484,7 @@ static void _bind_handle_0x04(const lora_frame_t *frame)
 static void _bind_handle_dev_ack(const lora_frame_t *frame)
 {
     /* 校验是不是 pending_uid 回的(避免别的设备 0x80 蹭进来) */
-    if (memcmp(frame->dev_uid, g_bind.pending_uid, 3U) != 0)
+    if (memcmp(frame->dev_uid, g_bind.pending_uid, CFG_UID_BYTES) != 0)
     {
         log_info("[BIND] !! 收到 %02X%02X%02X 的 0x80, 但 pending 是 %02X%02X%02X, 忽略\r\n",
                  frame->dev_uid[0], frame->dev_uid[1], frame->dev_uid[2],
@@ -481,7 +494,7 @@ static void _bind_handle_dev_ack(const lora_frame_t *frame)
 
     /* 1) hex 串形式(供 config_store / 事件回调用) */
     char uid_hex[CFG_UID_STR_MAX];
-    /* cfg_uid_from_bytes 把 3 字节转 hex, 不会失败(3 字节永远有效) */
+    /* cfg_uid_from_bytes 把 13 字节转 hex, 不会失败(非全 0 即有效) */
     (void)cfg_uid_from_bytes(g_bind.pending_uid, uid_hex);
 
     /* 2) 追加到运行期从机表(失败就别写 config_store, 免得两边不一致) */
@@ -489,14 +502,69 @@ static void _bind_handle_dev_ack(const lora_frame_t *frame)
     int idx = _slave_table_add(g_bind.pending_uid, type);
     if (idx < 0)
     {
-        log_info("[BIND] !! 运行期从机表追加失败(idx=%d, 表满/已存在), 不写 config_store\r\n", idx);
-        /* 表已存在的情况也算"绑定成功", 只是这一台早就进表了 —— 触发 BOUND 让云端知道 */
-        if (idx == -1 && _find_slave(g_bind.pending_uid) != 0xFFU)
+        /* ==================================================================
+         * ★★2026-10-14 重绑: 已在从机表 ⇒ 允许再绑, 但【不新增】条目 ★★
+         * ------------------------------------------------------------------
+         * 【用户场景】设备坏了换新, 重新烧录后回到【同一默认地址】
+         *   ⇒ 网关必须允许同 UID 再绑一次; 若拒绝, 现场换设备就必须先解绑,
+         *     很难操作。且从机表里【不能出现两条同 UID】。
+         *
+         * 【用户口径, 三条】
+         *   ① serial/name 用本次绑定窗口里的新值【覆盖】(换了设备, 标识也该换);
+         *   ② 【不】动 report_period_s 等运行参数 —— 平台一定会再下发一次上报周期,
+         *      等于给新设备设一遍(动了反而把平台设的值悄悄改回默认 60);
+         *   ③ 【不继承】旧设备的历史值 ⇒ 清掉该 UID 的快照。
+         *      理由: 否则新设备还没上报时 sen.query 就回旧水位、level_supervisor
+         *      会拿旧水位算档位(新设备一上电就按旧水位点灯)、失联判定也可能因
+         *      "缓存里的 rx_tick_ms 很新"而误判在线。
+         *
+         * ⚠️ 这里【不能】用 config_store_bind_device() —— 它对已存在的 UID 直接
+         *    返回 CFG_ERR_RANGE(见该函数开头), 会静默什么都不改。
+         * ⚠️ 也【不能】用 config_store_unbind_device() + bind "先删再建" ——
+         *    unbind 会连带清掉 gears[].target_uid 里指向该 UID 的条目,
+         *    那台设备以后收不到联动指令(能绑定、能上报, 就是不动灯)。
+         *
+         * ⚠️⚠️ 【本分支目前没有主机单测覆盖】⚠️⚠️
+         *   _host_test 里没有任何套件链接【真的】app/protocol/lora_business.c
+         *   (test_cloud 用的是 _host_test/fake_lora_business.c 那个假实现),
+         *   因为本文件依赖 LoRa/radio 时序。⇒ 改这段代码【必须上板验证】,
+         *   "主机单测全绿"对它没有意义。
+         *   已有的主机覆盖只到它调用的两个新函数:
+         *     · config_store_rebind_device() -> test_cfg 用例 [14]
+         *     · last_value_clear_uid()       -> test_last_value 用例 [10]
+         * ================================================================== */
+        if ((idx == -1) && (_find_slave(g_bind.pending_uid) != 0xFFU))
         {
+            cfg_result_t rb;
+
+            log_info("[BIND] %s %s 重新绑定(已在从机表, 不新增): serial=%s name=%s\r\n",
+                     g_bind.is_sensor ? "液位传感器" : "声光设备",
+                     uid_hex,
+                     g_bind.expected_serial[0] ? g_bind.expected_serial : "(none)",
+                     g_bind.expected_name[0]    ? g_bind.expected_name    : "(none)");
+
+            /* ① 覆盖 serial/name(设备侧连 type 一起更新; 运行参数一律不动) */
+            rb = config_store_rebind_device(uid_hex, g_bind.expected_serial,
+                                            g_bind.expected_name, g_bind.dev_type,
+                                            cloud_proto_get_now_ts());
+            if (rb != CFG_OK)
+            {
+                /* 落盘失败: 运行期表已经是"已存在"状态, 不必回滚, 但要让现场看见 */
+                log_info("[BIND] !! 重绑写 config_store 失败(code=%d), 本次只更新了运行期表\r\n",
+                         (int)rb);
+            }
+
+            /* ③ 清该 UID 的历史快照(新设备不继承旧值; 其它 UID 不受影响) */
+            (void)last_value_clear_uid(g_bind.pending_uid);
+
             _bind_fire(uid_hex, g_bind.is_sensor, LORA_BIND_EVENT_BOUND);
             g_bind.state = BIND_IDLE;
             return;
         }
+
+        /* 到这里就是真失败: 从机表【满了】 */
+        log_info("[BIND] !! 从机表【已满】, 无法绑定 %s(idx=%d) —— 请先解绑不用的设备\r\n",
+                 uid_hex, idx);
         _bind_fire(uid_hex, g_bind.is_sensor, LORA_BIND_EVENT_BIND_FAILED);
         g_bind.state = BIND_IDLE;
         return;
@@ -591,10 +659,10 @@ static void _bind_logic(void)
  * _slave_table_del 会把末尾从机搬到当前格, s 已经不一定指向原来了)。
  *
  * 返回 true = 已删除; false = uid 解 hex 失败(运行期表仍删, 但 config_store 没动) */
-static bool _unbind_finalize(const uint8_t uid[3], bool is_sensor)
+static bool _unbind_finalize(const uint8_t uid[CFG_UID_BYTES], bool is_sensor)
 {
     char  uid_hex[CFG_UID_STR_MAX];
-    /* cfg_uid_from_bytes 把 3 字节转 hex, 不会失败(3 字节永远有效) */
+    /* cfg_uid_from_bytes 把 13 字节转 hex, 不会失败(非全 0 即有效) */
     (void)cfg_uid_from_bytes(uid, uid_hex);
     (void)config_store_unbind_device(uid_hex, cloud_proto_get_now_ts());
     log_info("[UNBIND] %02X%02X%02X(%s) 已删除 config_store, 触发 UNBOUND 事件\r\n",
@@ -625,7 +693,7 @@ static bool _unbind_finalize(const uint8_t uid[3], bool is_sensor)
 static uint8_t g_alarm_gear_inflight;
 
 /* 前置声明: 实现在 handle_ack_from_device 之前那段, 但 _handle_down_logic 先用到它们 */
-static void _alarm_fire_result(const lora_slave_t *s, bool ok, bool gave_up);
+static void _alarm_fire_result(const lora_slave_t *s, bool ok, bool gave_up, bool recovered);
 static void _alarm_on_fail(lora_slave_t *s);
 
 static bool _transmit_downlink(uint8_t idx)
@@ -635,8 +703,8 @@ static bool _transmit_downlink(uint8_t idx)
     bool         ok;
 
     memset(&frame, 0, sizeof(frame));
-    memcpy(frame.gw_uid,  g_gw_uid,  3);
-    memcpy(frame.dev_uid, s->dev_uid, 3);
+    memcpy(frame.gw_uid,  g_gw_uid, CFG_UID_BYTES);
+    memcpy(frame.dev_uid, s->dev_uid, CFG_UID_BYTES);
     frame.func      = s->pending_func;
     frame.data_len  = s->pending_data_len;
     if (frame.data_len > 0U)
@@ -704,7 +772,7 @@ static void _unbind_send_frame(void)
 static void _unbind_fire_event(lora_bind_event_t event)
 {
     char uid_hex[CFG_UID_STR_MAX];
-    /* cfg_uid_from_bytes 把 3 字节转 hex, 不会失败(3 字节永远有效) */
+    /* cfg_uid_from_bytes 把 13 字节转 hex, 不会失败(非全 0 即有效) */
     (void)cfg_uid_from_bytes(g_unbind.uid, uid_hex);
     _bind_fire(uid_hex, g_unbind.is_sensor, event);
 }
@@ -717,7 +785,7 @@ static void _unbind_clear_slave_state(void)
     if (g_unbind.slave_idx < g_slave_count)
     {
         lora_slave_t *s = &g_slave_list[g_unbind.slave_idx];
-        if (memcmp(s->dev_uid, g_unbind.uid, 3U) == 0)
+        if (memcmp(s->dev_uid, g_unbind.uid, CFG_UID_BYTES) == 0)
         {
             s->state            = SLAVE_STATE_IDLE;
             s->retry_cnt        = 0U;
@@ -831,9 +899,9 @@ static void _unbind_logic(void)
             /* 成功路径: 先拷 uid/is_sensor, 再 _unbind_reset(清 g_unbind 释放锁),
              * 最后 _unbind_finalize —— 它会 _slave_table_del 让 slave_idx 失效,
              * 所以必须先 reset 释放索引引用, 再用 uid_copy 找条目删 */
-            uint8_t uid_copy[3];
+            uint8_t uid_copy[CFG_UID_BYTES];
             bool    is_sensor = g_unbind.is_sensor;
-            memcpy(uid_copy, g_unbind.uid, 3U);
+            memcpy(uid_copy, g_unbind.uid, CFG_UID_BYTES);
             log_info("[UNBIND] 阶段2 %us 没收到 ack, 设备已清网关值, 解绑成功\r\n",
                      (unsigned)(LORA_UNBIND_PHASE2_MS / 1000U));
             _unbind_reset();
@@ -1061,7 +1129,7 @@ static void _try_send_alarm_idle(void)
     }
 }
 /* 前置声明: 实现在 handle_ack_from_device 之前那段注释下面 */
-static void _schedule_default_level_downlink(const uint8_t dev_uid[3]);
+static void _schedule_default_level_downlink(const uint8_t dev_uid[CFG_UID_BYTES]);
 
 /* ==================== 液位失联检测(2026-09-27 用户补充要求第 3 条) ====================
  *
@@ -1088,6 +1156,14 @@ static lora_sensor_event_fn g_sensor_event_cb;
 void lora_business_set_sensor_event_cb(lora_sensor_event_fn fn)
 {
     g_sensor_event_cb = fn;
+}
+
+/* ★2026-10-18: 每次液位上报(0x02)的原始数据回调 —— 供主程序做"离线补报" */
+static lora_level_report_fn g_level_report_cb;
+
+void lora_business_set_level_report_cb(lora_level_report_fn fn)
+{
+    g_level_report_cb = fn;
 }
 
 /* 把一次跳变交给上层; 没注册回调时如实打日志(弱网/未挂载时现场要能看出来) */
@@ -1140,6 +1216,318 @@ void lora_business_check_sensor_offline(void)
                      (unsigned)period_s, (unsigned)SENSOR_OFFLINE_PERIOD_MULT);
             _sensor_event_fire(s, false);
         }
+    }
+}
+
+/* ==================================================================
+ * ★2026-10-18: 设备在线/离线状态查询(给 sen.query / dev.query 的 online 用)
+ * ------------------------------------------------------------------
+ * 【为什么不能继续用 last_value 快照】那张表只有液位 0x02 会写, 声光从不进表
+ *   ⇒ 声光的 online 恒 false, 平台会一直以为它掉了。
+ * 【为什么声光不用 last_recv_tick】声光平时不收帧(只有下发 0x03 时才回 0x80/
+ *   0x82/0x83), 用"多久没收到帧"判它失联, 会在没下发动作时【一直误判离线】。
+ *   所以对它只认一条证据: 3 条 0x03 都没成功(alarm_offline_reported)。
+ * ================================================================== */
+lora_dev_state_t lora_business_device_state_bytes(const uint8_t uid[LORA_UID_BYTES])
+{
+    uint8_t i;
+
+    if (uid == NULL)
+    {
+        return LORA_DEV_STATE_UNKNOWN;
+    }
+
+    for (i = 0u; i < g_slave_count; i++)
+    {
+        const lora_slave_t *s = &g_slave_list[i];
+
+        if (memcmp(s->dev_uid, uid, LORA_UID_BYTES) != 0) { continue; }
+
+        if (s->dev_type == SLAVE_TYPE_SENSOR)
+        {
+            return s->is_online ? LORA_DEV_STATE_ONLINE : LORA_DEV_STATE_OFFLINE;
+        }
+
+        /* 声光: 只有"3 条 0x03 都没成功"这一条确凿证据 */
+        return s->alarm_offline_reported ? LORA_DEV_STATE_OFFLINE
+                                         : LORA_DEV_STATE_ONLINE;
+    }
+
+    return LORA_DEV_STATE_UNKNOWN;      /* 不在从机表里 */
+}
+
+lora_dev_state_t lora_business_device_state(const char *uid_hex)
+{
+    uint8_t uid[CFG_UID_BYTES];
+
+    if ((uid_hex == NULL) || (!cfg_uid_to_bytes(uid_hex, uid)))
+    {
+        return LORA_DEV_STATE_UNKNOWN;
+    }
+
+    return lora_business_device_state_bytes(uid);
+}
+
+/* ==================================================================
+ * ★★2026-10-18 新增: 出厂字段的写入(0x06) / 读取(0x07)★★
+ * ==================================================================
+ * 【为什么单独一套状态机, 不复用 _try_send_alarm_idle / data_cache】
+ *   1) 用户明确"只在本地跑, 不要让云端知道" ⇒ 不能进 data_cache(那条路会组帧
+ *      发 MQTT / 走云端下发队列), 否则离线/在线的行为都不一样了;
+ *   2) 重发节奏是【每 5 秒一次、只发 3 次】, 与 0x01/0x03 的"帧级重传 + 业务重试"
+ *      完全不同, 硬塞进去会把两套节拍搅在一起;
+ *   3) 目标设备是"从机表里唯一那台"(产线一次只接一台), 不需要按 uid 分发。
+ *
+ * 【0x80/0x81 的归属问题】
+ *   0x80 是纯应答码, 不带"应答的是哪个 func"(见 lora_business_send_ack 的注释),
+ *   所以只能靠"当前有没有在等"来判断。字段操作期间不并发下发别的 0x01/0x03,
+ *   这个前提在产线场景下成立; 真要并发, 得给协议加"原功能码"字段(两端同时改)。
+ * ================================================================== */
+#define FIELD_WRITE_RETRY_MS   5000U    /* 写字段: 每 5 秒补发一次(用户指定) */
+#define FIELD_WRITE_MAX_TRIES  3U       /* 写字段: 最多发 3 条(用户指定) */
+#define FIELD_READ_WAIT_MS     12000U   /* 读字段: 只发一次 0x07, 等 12 秒
+                                         * (设备侧自己会重发 0x08 两次, 各 5 秒) */
+
+typedef enum
+{
+    FIELD_OP_IDLE = 0,
+    FIELD_OP_WRITE,
+    FIELD_OP_READ
+} field_op_t;
+
+static struct
+{
+    field_op_t state;
+    uint8_t    dev_uid[CFG_UID_BYTES];
+    char       field[LORA_FIELD_LEN + 1u];
+    uint8_t    tries;
+    uint32_t   last_tx_tick;
+    uint32_t   deadline_tick;
+} g_field;
+
+static lora_field_result_fn g_field_result_cb;
+
+void lora_business_set_field_result_cb(lora_field_result_fn fn)
+{
+    g_field_result_cb = fn;
+}
+
+/** 收尾: 清状态并回调(ok/field 由调用方判定), 只回调一次 */
+static void _field_finish(bool ok, const char *field10)
+{
+    char buf[LORA_FIELD_LEN + 1u];
+    uint8_t i;
+
+    g_field.state = FIELD_OP_IDLE;
+
+    if ((field10 != NULL) && ok)
+    {
+        for (i = 0u; i < LORA_FIELD_LEN; i++) { buf[i] = field10[i]; }
+        buf[LORA_FIELD_LEN] = '\0';
+    }
+    else
+    {
+        buf[0] = '\0';
+    }
+
+    if (g_field_result_cb != NULL)
+    {
+        g_field_result_cb(ok, buf);
+    }
+}
+
+/** 组一帧直接发(不经 data_cache / 不进云端队列) */
+static bool _field_send(uint8_t func, const uint8_t *data, uint8_t dlen)
+{
+    lora_frame_t f;
+
+    (void)memset(&f, 0, sizeof(f));
+    (void)memcpy(f.gw_uid,  g_gw_uid,       CFG_UID_BYTES);
+    (void)memcpy(f.dev_uid, g_field.dev_uid, CFG_UID_BYTES);
+    f.func     = func;
+    f.data_len = dlen;
+    if ((data != NULL) && (dlen > 0u))
+    {
+        (void)memcpy(f.data, data, dlen);
+    }
+
+    return lora_proto_send_frame(&f);
+}
+
+/** 目标设备 = 从机表里唯一那台; 不满足返回 false(调用方负责提示) */
+static bool _field_pick_target(void)
+{
+    if (g_slave_count != 1u)
+    {
+        log_info("[FIELD] !! 从机表里有 %u 台设备, 字段操作要求正好 1 台"
+                 "(先 #bind 绑进来, 或先解绑其它设备)\r\n",
+                 (unsigned)g_slave_count);
+        return false;
+    }
+    (void)memcpy(g_field.dev_uid, g_slave_list[0].dev_uid, CFG_UID_BYTES);
+    return true;
+}
+
+bool lora_business_field_write_begin(const char *field10)
+{
+    uint8_t i;
+
+    if (g_field.state != FIELD_OP_IDLE)
+    {
+        log_info("[FIELD] !! 已有字段操作在进行, 先等它结束(#field 可看状态)\r\n");
+        return false;
+    }
+    if ((field10 == NULL) || (strlen(field10) != (size_t)LORA_FIELD_LEN))
+    {
+        log_info("[FIELD] !! 字段必须恰好 %u 字节(实际 %u) -> 不发\r\n",
+                 (unsigned)LORA_FIELD_LEN,
+                 (unsigned)((field10 != NULL) ? strlen(field10) : 0u));
+        return false;
+    }
+    if (!_field_pick_target()) { return false; }
+
+    for (i = 0u; i < LORA_FIELD_LEN; i++) { g_field.field[i] = field10[i]; }
+    g_field.field[LORA_FIELD_LEN] = '\0';
+
+    g_field.state      = FIELD_OP_WRITE;
+    g_field.tries      = 0u;
+    g_field.last_tx_tick = get_tick_ms();
+
+    log_info("[FIELD] 开始写字段 \"%s\" 到 %02X%02X%02X (每 %us 一条, 最多 %u 条)\r\n",
+             g_field.field, g_field.dev_uid[0], g_field.dev_uid[1], g_field.dev_uid[2],
+             (unsigned)(FIELD_WRITE_RETRY_MS / 1000u), (unsigned)FIELD_WRITE_MAX_TRIES);
+
+    /* 立刻发第一条 */
+    g_field.tries++;
+    if (!_field_send((uint8_t)LORA_FUNC_SET_FIELD, (const uint8_t *)g_field.field,
+                     (uint8_t)LORA_FIELD_LEN))
+    {
+        log_info("[FIELD] !! 第 1 条 0x06 发送失败(射频忙?), 继续按节奏重试\r\n");
+    }
+    return true;
+}
+
+bool lora_business_field_read_begin(void)
+{
+    if (g_field.state != FIELD_OP_IDLE)
+    {
+        log_info("[FIELD] !! 已有字段操作在进行\r\n");
+        return false;
+    }
+    if (!_field_pick_target()) { return false; }
+
+    g_field.state         = FIELD_OP_READ;
+    g_field.tries         = 1u;
+    g_field.last_tx_tick  = get_tick_ms();
+    g_field.deadline_tick = get_tick_ms() + FIELD_READ_WAIT_MS;
+    g_field.field[0]      = '\0';
+
+    log_info("[FIELD] 开始读 %02X%02X%02X 的字段(0x07 只发一次, 等 %us)\r\n",
+             g_field.dev_uid[0], g_field.dev_uid[1], g_field.dev_uid[2],
+             (unsigned)(FIELD_READ_WAIT_MS / 1000u));
+
+    if (!_field_send((uint8_t)LORA_FUNC_GET_FIELD, NULL, 0u))
+    {
+        log_info("[FIELD] !! 0x07 发送失败(射频忙?) -> 直接判失败\r\n");
+        _field_finish(false, "");
+        return false;
+    }
+    return true;
+}
+
+void lora_business_field_poll(void)
+{
+    uint32_t now = get_tick_ms();
+
+    if (g_field.state == FIELD_OP_IDLE)
+    {
+        return;
+    }
+
+    if (g_field.state == FIELD_OP_WRITE)
+    {
+        if ((uint32_t)(now - g_field.last_tx_tick) < FIELD_WRITE_RETRY_MS)
+        {
+            return;                     /* 还没到 5 秒 */
+        }
+
+        if (g_field.tries >= FIELD_WRITE_MAX_TRIES)
+        {
+            /* 3 条都发完 + 最后一条也等满了 5 秒 ⇒ 判失败(用户口径) */
+            log_info("[FIELD] !! 3 条 0x06 都没收到 0x80 -> 写字段失败\r\n");
+            _field_finish(false, "");
+            return;
+        }
+
+        g_field.tries++;
+        g_field.last_tx_tick = now;
+        log_info("[FIELD] 第 %u/%u 条 0x06 重发\r\n",
+                 (unsigned)g_field.tries, (unsigned)FIELD_WRITE_MAX_TRIES);
+        if (!_field_send((uint8_t)LORA_FUNC_SET_FIELD, (const uint8_t *)g_field.field,
+                         (uint8_t)LORA_FIELD_LEN))
+        {
+            log_info("[FIELD] !! 本条 0x06 发送失败, 继续按节奏重试\r\n");
+        }
+        return;
+    }
+
+    /* FIELD_OP_READ */
+    if ((int32_t)(now - g_field.deadline_tick) >= 0)
+    {
+        log_info("[FIELD] !! %us 内没收到 0x08 -> 读字段失败\r\n",
+                 (unsigned)(FIELD_READ_WAIT_MS / 1000u));
+        _field_finish(false, "");
+    }
+}
+
+void lora_business_field_cancel(void)
+{
+    if (g_field.state != FIELD_OP_IDLE)
+    {
+        log_info("[FIELD] 字段操作被取消\r\n");
+        g_field.state = FIELD_OP_IDLE;
+    }
+}
+
+/**
+ * @brief 收到设备的 0x08(字段应答) —— ★必须回 0x80 做 ack★
+ *
+ * 【为什么无论等不等都要回】设备侧的逻辑是"发 0x08 -> 开 5 秒窗口等网关 ack ->
+ *   没收到就再发一次"。网关不回, 设备会白等两个 5 秒窗口(真实占用空口和电)。
+ *   所以这里【先回 ack, 再判断要不要采用这个字段】。
+ *
+ * 【为什么立刻回, 不走 _reply_schedule 的 3 秒延迟】设备的窗口只有 5 秒,
+ *   3 秒延迟虽然勉强够, 但一旦叠加处理/发射时间就容易踩线。0x08 是设备对
+ *   我们 0x07 的应答, 不会引发"两边互相 ACK"的风暴(那是 0x80/0x81 才有的风险),
+ *   所以可以立刻回。
+ */
+static void handle_field_resp(const lora_frame_t *frame, uint8_t idx)
+{
+    char    field[LORA_FIELD_LEN + 1u];
+    uint8_t i;
+
+    (void)idx;
+    (void)lora_business_send_ack(g_gw_uid, frame->dev_uid,
+                                 LORA_FUNC_FIELD_RESP, true, 0U);
+
+    if (frame->data_len != (uint8_t)LORA_FIELD_LEN)
+    {
+        log_info("[FIELD] !! 0x08 的 data_len=%u, 期望 %u -> 丢弃"
+                 "(但 ack 已经回了, 设备不会白等)\r\n",
+                 (unsigned)frame->data_len, (unsigned)LORA_FIELD_LEN);
+        return;
+    }
+
+    for (i = 0u; i < LORA_FIELD_LEN; i++) { field[i] = (char)frame->data[i]; }
+    field[LORA_FIELD_LEN] = '\0';
+
+    log_info("[FIELD] 设备 %02X%02X%02X 回报字段 = \"%s\"\r\n",
+             frame->dev_uid[0], frame->dev_uid[1], frame->dev_uid[2], field);
+
+    if ((g_field.state == FIELD_OP_READ) &&
+        (memcmp(frame->dev_uid, g_field.dev_uid, CFG_UID_BYTES) == 0))
+    {
+        _field_finish(true, field);
     }
 }
 
@@ -1225,6 +1613,16 @@ static void handle_sensor_report(const lora_frame_t *frame, uint8_t slave_idx,
      *    直接 SYS_ERR(记录已被 pop) —— 现象就是"液位偶尔少一条"。 */
     data_cache_up_push(frame->dev_uid, level_mm, bat_pct, time_mdhhm, rssi_dbm);
 
+    /* ★2026-10-18: 通知主程序"又收到一条液位上报" —— 它会在 4G 离线时把这条
+     *   存进 telemetry_cache, 重连后按【此刻】的时间戳逐条补报。
+     *   与上一行的分工: 上行 data_cache_up_push 是 last_value 快照的漏斗(在线
+     *   聚合遥测要用), 这一条是"离线补报"的漏斗, 两者互不影响。
+     *   放在长度校验之后 —— 残帧不算一次有效上报(否则补报里会混进垃圾值)。 */
+    if (g_level_report_cb != NULL)
+    {
+        g_level_report_cb(frame->dev_uid, level_mm, (uint8_t)bat_pct, rssi_dbm);
+    }
+
     /* 2. 液位告警检测 (暂留空, 未对接 local_alarm)
      *   if (level_mm > threshold) lora_business_send_req(slave->dev_uid, SLAVE_TYPE_ALARM_OUT,
      *                                                     LORA_FUNC_SET_ALARM, alarm_payload, len); */
@@ -1279,7 +1677,7 @@ static const uint8_t LORA_LEVEL_DEFAULT_DATA[13] =
     26U, 9U, 18U, 5U, 13U, 25U   /* off7-12 校时: 2026-09-18 周五 13:25 */
 };
 
-static void _schedule_default_level_downlink(const uint8_t dev_uid[3])
+static void _schedule_default_level_downlink(const uint8_t dev_uid[CFG_UID_BYTES])
 {
 #if LORA_LEVEL_PUSH_DEFAULT
     cache_down_item_t probe;
@@ -1328,18 +1726,20 @@ void lora_business_set_alarm_result_cb(lora_alarm_result_fn fn)
 }
 
 /** 拿到 uid 的 hex 串并回调主程序(没注册就只打日志) */
-static void _alarm_fire_result(const lora_slave_t *s, bool ok, bool gave_up)
+static void _alarm_fire_result(const lora_slave_t *s, bool ok, bool gave_up,
+                               bool recovered)
 {
     char uid_hex[CFG_UID_STR_MAX];
 
     (void)cfg_uid_from_bytes(s->dev_uid, uid_hex);
 
-    log_info("[GEAR] 上报执行结果 uid=%s gear=%u ok=%u gave_up=%u\r\n",
-             uid_hex, (unsigned)s->alarm_gear, ok ? 1u : 0u, gave_up ? 1u : 0u);
+    log_info("[GEAR] 上报执行结果 uid=%s gear=%u ok=%u gave_up=%u recovered=%u\r\n",
+             uid_hex, (unsigned)s->alarm_gear, ok ? 1u : 0u, gave_up ? 1u : 0u,
+             recovered ? 1u : 0u);
 
     if (g_alarm_result_cb != NULL)
     {
-        g_alarm_result_cb(uid_hex, s->alarm_gear, ok, gave_up);
+        g_alarm_result_cb(uid_hex, s->alarm_gear, ok, gave_up, recovered);
     }
 }
 
@@ -1368,7 +1768,9 @@ static void _alarm_on_fail(lora_slave_t *s)
                  s->dev_uid[0], s->dev_uid[1], s->dev_uid[2],
                  (unsigned)s->alarm_attempts);
         data_cache_down_del_by_uid(s->dev_uid);
-        _alarm_fire_result(s, false, true);         /* ok=false, gave_up=true */
+        /* ★2026-10-18 (丙): 记下"已报离线", 等它下次 0x82 成功时补报 recovered ★ */
+        s->alarm_offline_reported = true;
+        _alarm_fire_result(s, false, true, false);  /* ok=false, gave_up=true */
         s->alarm_attempts = 0U;
         return;
     }
@@ -1392,6 +1794,27 @@ static void handle_ack_from_device(const lora_frame_t *frame, uint8_t slave_idx)
     {
         (void)frame;   /* ack 内容不区分 0x80/0x81, 都视为设备应答 */
         _unbind_on_ack();
+        return;
+    }
+
+    /* ★2026-10-18: 字段写(0x06)的 ack 归属 —— 必须在 slave 状态机之前判。
+     *   字段操作【不走】SLAVE_STATE_WAIT_ACK(state 一直是 IDLE), 否则下面
+     *   那句 `if (s->state != SLAVE_STATE_WAIT_ACK) return;` 会把 0x80 丢掉,
+     *   于是"设备明明确认了, 串口却一直等到 3 次发完报失败"。
+     *   0x80 = 写成功; 0x81 = 设备明确拒绝(立即判失败, 不再等剩下两条)。 */
+    if ((g_field.state == FIELD_OP_WRITE) &&
+        (memcmp(frame->dev_uid, g_field.dev_uid, CFG_UID_BYTES) == 0))
+    {
+        if (frame->func == (uint8_t)LORA_FUNC_RESP_OK)
+        {
+            log_info("[FIELD] 设备确认已写入(0x80), 停止重发\r\n");
+            _field_finish(true, "");
+        }
+        else
+        {
+            log_info("[FIELD] !! 设备回 0x81(拒绝/失败) -> 写字段失败\r\n");
+            _field_finish(false, "");
+        }
         return;
     }
 
@@ -1427,7 +1850,14 @@ static void handle_ack_from_device(const lora_frame_t *frame, uint8_t slave_idx)
             data_cache_down_del_by_uid(s->dev_uid);
             log_info("[GEAR] ★%02X%02X%02X 执行成功(0x82)★ 档位 %u\r\n",
                      s->dev_uid[0], s->dev_uid[1], s->dev_uid[2], (unsigned)s->alarm_gear);
-            _alarm_fire_result(s, true, false);
+            /* ★2026-10-18 (丙): 之前判过离线? 这一拍成功就是"恢复" ★
+             * 带 recovered=true 回调, 主程序会补一条 event.device{"online"}。 */
+            {
+                bool was_offline = s->alarm_offline_reported;
+
+                s->alarm_offline_reported = false;
+                _alarm_fire_result(s, true, false, was_offline);
+            }
             return;
         }
         if (frame->func == (uint8_t)LORA_FUNC_ALARM_FAIL)       /* 0x83: 失败 */
@@ -1487,12 +1917,54 @@ typedef enum
 
 static gw_reply_state_t g_reply_state = GW_REPLY_IDLE;
 static uint32_t         g_reply_tick  = 0U;
-static uint8_t          g_reply_dev[3];
+static uint8_t          g_reply_dev[CFG_UID_BYTES];
+/* ★★2026-10-18 修复(严重): 这里原来是 `[3]`★★
+ *   _reply_schedule() 里是 `memcpy(g_reply_dev, dev_uid, CFG_UID_BYTES)`,
+ *   UID 扩到 13 字节后, 往 3 字节数组里写 13 字节 ⇒
+ *     ① 越界写坏紧跟其后的全局变量;
+ *     ② 3 秒后 _reply_logic() 用 g_reply_dev 发 0x80 ACK 时,
+ *        只有前 3 字节是对的, 后 10 字节是垃圾 ⇒ 地址根本不存在。
+ *   现场表现(2026-10-18 实测): 设备上报 0x02 后, 网关的 ACK 发错地址,
+ *   设备以为没收到, 连续重发 5 条 0x80(约 2 秒一条), 最后放弃。
+ *   ⇒ 所有"存 13 字节 UID 的静态数组"都必须用 CFG_UID_BYTES 定尺寸。 */
+
+/* ==================================================================
+ * ★2026-10-18: UID 尺寸【静态断言】—— 防止"改了长度忘改缓冲"再次发生
+ * ==================================================================
+ * 【为什么要这一块】上面 g_reply_dev 那个故障的本质是:
+ *     声明 3 字节数组, 却 memcpy 13 字节 ⇒ 越界写坏别的全局变量 +
+ *     发出去的帧地址是垃圾, 而【编译期零告警、主机单测也测不到】,
+ *     只有上板收发才会暴露。
+ * 【为什么编译器抓不到】数组作函数参数会退化成指针, memcpy 的形参是 void* ——
+ *   这一整条链路上没有任何类型/尺寸检查。
+ * ⇒ 所以在这里把"存 UID 的结构体成员 / 文件级静态数组"的尺寸【钉死】。
+ *   以后谁再改 UID 长度而漏改某个缓冲, 【这里编译就失败】, 不用等上板。
+ * ================================================================== */
+_Static_assert(sizeof(((lora_frame_t *)0)->gw_uid)        == CFG_UID_BYTES,
+               "lora_frame_t.gw_uid 必须等于 CFG_UID_BYTES");
+_Static_assert(sizeof(((lora_frame_t *)0)->dev_uid)       == CFG_UID_BYTES,
+               "lora_frame_t.dev_uid 必须等于 CFG_UID_BYTES");
+_Static_assert(sizeof(((lora_slave_t *)0)->dev_uid)       == CFG_UID_BYTES,
+               "lora_slave_t.dev_uid 必须等于 CFG_UID_BYTES");
+_Static_assert(sizeof(((cache_down_item_t *)0)->dev_uid)  == CFG_UID_BYTES,
+               "cache_down_item_t.dev_uid 必须等于 CFG_UID_BYTES");
+_Static_assert(sizeof(((device_param_t *)0)->gw_uid)      == CFG_UID_BYTES,
+               "device_param_t.gw_uid 必须等于 CFG_UID_BYTES");
+_Static_assert(sizeof(((param_slave_uid_t *)0)->uid)      == CFG_UID_BYTES,
+               "param_slave_uid_t.uid 必须等于 CFG_UID_BYTES");
+_Static_assert(sizeof(((last_value_t *)0)->uid)           == CFG_UID_BYTES,
+               "last_value_t.uid 必须等于 CFG_UID_BYTES");
+_Static_assert(sizeof(g_gw_uid)              == CFG_UID_BYTES, "g_gw_uid 必须 13 字节");
+_Static_assert(sizeof(g_reply_dev)           == CFG_UID_BYTES, "g_reply_dev 必须 13 字节(2026-10-18 踩过坑)");
+_Static_assert(sizeof(g_bind.pending_uid)    == CFG_UID_BYTES, "g_bind.pending_uid 必须 13 字节");
+_Static_assert(sizeof(g_unbind.uid)          == CFG_UID_BYTES, "g_unbind.uid 必须 13 字节");
+_Static_assert(sizeof(g_field.dev_uid)       == CFG_UID_BYTES, "g_field.dev_uid 必须 13 字节");
+/* (tc_record_t / ec_record_t 的断言放在各自的 .c 里 —— 本文件不 include 那两个头) */
 static uint8_t          g_reply_func  = 0U;
 static uint8_t          g_reply_idx   = 0xFFU;
 
 /* on_frame 里调用: 只登记"要回谁", 真正的发送交给 _reply_logic() 分两步做 */
-static void _reply_schedule(const uint8_t dev_uid[3], uint8_t func, uint8_t idx)
+static void _reply_schedule(const uint8_t dev_uid[CFG_UID_BYTES], uint8_t func, uint8_t idx)
 {
     if (g_reply_state != GW_REPLY_IDLE)
     {
@@ -1501,7 +1973,7 @@ static void _reply_schedule(const uint8_t dev_uid[3], uint8_t func, uint8_t idx)
                  dev_uid[0], dev_uid[1], dev_uid[2]);
     }
 
-    memcpy(g_reply_dev, dev_uid, 3U);
+    memcpy(g_reply_dev, dev_uid, CFG_UID_BYTES);
     g_reply_func  = func;
     g_reply_idx   = idx;
     g_reply_tick  = get_tick_ms();
@@ -1619,7 +2091,7 @@ static void on_frame(const lora_frame_t *frame, int8_t rssi, int8_t snr)
     }
     if (g_bind.state == BIND_WAIT_DEV_ACK
         && frame->func == LORA_FUNC_RESP_OK
-        && memcmp(frame->dev_uid, g_bind.pending_uid, 3U) == 0)
+        && memcmp(frame->dev_uid, g_bind.pending_uid, CFG_UID_BYTES) == 0)
     {
         _bind_handle_dev_ack(frame);
         return;
@@ -1680,8 +2152,11 @@ static void on_frame(const lora_frame_t *frame, int8_t rssi, int8_t snr)
      *   给它们回 ACK 就是同一场 ACK 风暴。
      *   (现场 2026-10-10: 声光回了 0x82, 走 default 打"未处理的功能码" —— 因为
      *    下面的 switch 里根本没有它的 case, 所以既没处理、也差点被这条 if 排上 ACK。) */
-    if ((frame->func != LORA_FUNC_RESP_OK)   && (frame->func != LORA_FUNC_RESP_ERR) &&
-        (frame->func != LORA_FUNC_ALARM_DONE) && (frame->func != LORA_FUNC_ALARM_FAIL))
+    if ((frame->func != LORA_FUNC_RESP_OK)    && (frame->func != LORA_FUNC_RESP_ERR) &&
+        (frame->func != LORA_FUNC_ALARM_DONE) && (frame->func != LORA_FUNC_ALARM_FAIL) &&
+        /* ★2026-10-18: 0x08(字段应答)也【不走】3 秒延迟 ACK ——
+         * 设备侧等 ack 的窗口只有 5 秒, handle_field_resp() 里已经【立刻】回了。 */
+        (frame->func != LORA_FUNC_FIELD_RESP))
     {
         _reply_schedule(frame->dev_uid, frame->func, idx);
     }
@@ -1690,6 +2165,9 @@ static void on_frame(const lora_frame_t *frame, int8_t rssi, int8_t snr)
     {
     case LORA_FUNC_SENSOR_REPORT:     /* 0x02 — 液位传感器上报 */
         handle_sensor_report(frame, idx, rssi);
+        break;
+    case LORA_FUNC_FIELD_RESP:        /* 0x08 — 设备回报出厂字段(必须回 ack) */
+        handle_field_resp(frame, idx);
         break;
     case LORA_FUNC_RESP_OK:           /* 0x80 — 从机对我们下发的 ACK_OK */
     case LORA_FUNC_RESP_ERR:          /* 0x81 — 从机回错误/重传 */
@@ -1792,7 +2270,7 @@ static void _downlink_drop(uint8_t func, const char *why)
  * 参数单位全部是【秒】(见上面的改版说明)。
  * 返回 0 成功; -1 载荷过长; -2 地址不在从机表; -3 间隔越界。
  */
-static int _sensor_params_commit(const uint8_t uid[3], uint16_t detect_s,
+static int _sensor_params_commit(const uint8_t uid[CFG_UID_BYTES], uint16_t detect_s,
                                  uint16_t report_s, bool same, uint16_t thresh_mm,
                                  const char *src)
 {
@@ -1865,7 +2343,7 @@ bool lora_business_set_sensor_params(const char *uid_hex,
                                      bool     report_same_level,
                                      uint16_t alarm_thresh_mm)
 {
-    uint8_t uid[3];
+    uint8_t uid[CFG_UID_BYTES];
 
     if (uid_hex == NULL) { return false; }
     if (!cfg_uid_to_bytes(uid_hex, uid))
@@ -2208,7 +2686,7 @@ static void lora_mqtt_recv_cb(const char *topic, const uint8_t *data, uint16_t l
 
     /* 帧里的"网关设备地址"应该是本机。不是也照样转发(要不要拦是策略问题),
      * 但必须打出来 —— 否则云端把网关号填错会一直没人发现。 */
-    if (memcmp(frame.gw_uid, g_gw_uid, 3U) != 0)
+    if (memcmp(frame.gw_uid, g_gw_uid, CFG_UID_BYTES) != 0)
     {
         log_info("[MQTT->LoRa] !! 帧里网关地址 %02X%02X%02X 与本机 %02X%02X%02X 不一致\r\n",
                  frame.gw_uid[0], frame.gw_uid[1], frame.gw_uid[2],
@@ -2303,7 +2781,7 @@ void lora_business_init(void)
     /* 1. 从 param_save 读取网关 UID (Flash 里如果还没烧写过会用 param_load_factory_default 的默认值) */
     param_save_init();
     device_param_t *p = param_get_ptr();
-    memcpy(g_gw_uid, p->gw_uid, 3U);
+    memcpy(g_gw_uid, p->gw_uid, CFG_UID_BYTES);
 
     /* 2. 装载从机表: 从 config_store 的 sensors[]/devices[] 读进来(uid + 设备类型),
      *    其余字段清零。运行期还支持 0x04 绑定追加 / 0x05 解绑删除。 */
@@ -2350,13 +2828,13 @@ void lora_business_poll(void)
     }
 }
 
-bool lora_business_send_ack(const uint8_t gw_uid[3], const uint8_t dev_uid[3],
+bool lora_business_send_ack(const uint8_t gw_uid[CFG_UID_BYTES], const uint8_t dev_uid[CFG_UID_BYTES],
                             uint8_t func, bool ok, uint8_t err_code)
 {
     lora_frame_t frame;
     memset(&frame, 0, sizeof(frame));
-    if (gw_uid)  memcpy(frame.gw_uid,  gw_uid,  3);
-    if (dev_uid) memcpy(frame.dev_uid, dev_uid, 3);
+    if (gw_uid)  memcpy(frame.gw_uid,  gw_uid, CFG_UID_BYTES);
+    if (dev_uid) memcpy(frame.dev_uid, dev_uid, CFG_UID_BYTES);
     frame.func = ok ? LORA_FUNC_RESP_OK : LORA_FUNC_RESP_ERR;
 
     /* 【0x80/0x81 是纯应答码, 没有数据域, data_len 必须为 0】
@@ -2376,7 +2854,7 @@ bool lora_business_send_ack(const uint8_t gw_uid[3], const uint8_t dev_uid[3],
     return lora_proto_send_frame(&frame);
 }
 
-int lora_business_send_req(const uint8_t uid[3], slave_type_t dev_type,
+int lora_business_send_req(const uint8_t uid[CFG_UID_BYTES], slave_type_t dev_type,
                            uint8_t func, const uint8_t *data, uint8_t data_len)
 {
     uint8_t idx;
@@ -2508,7 +2986,7 @@ int lora_business_unbind(const char *uid_hex)
 {
     if (uid_hex == NULL) return -1;
 
-    uint8_t uid[3];
+    uint8_t uid[CFG_UID_BYTES];
     if (!cfg_uid_to_bytes(uid_hex, uid)) return -1;
 
     uint8_t idx = _find_slave(uid);
@@ -2539,7 +3017,7 @@ int lora_business_unbind(const char *uid_hex)
     /* 2) 启动 g_unbind 状态机(阶段1); last_send_tick 下面 _unbind_send_frame
      *    会再刷新一次, 这里先置 now 防止首次 3s 间隔检查立刻又发一帧。 */
     g_unbind.state            = UNBIND_PHASE1;
-    memcpy(g_unbind.uid, uid, 3U);
+    memcpy(g_unbind.uid, uid, CFG_UID_BYTES);
     g_unbind.is_sensor        = is_sensor;
     g_unbind.slave_idx        = idx;
     g_unbind.phase_start_tick = now;
@@ -2682,7 +3160,7 @@ int lora_business_apply_gear_ex(uint8_t gear, const char *only_uid,
     for (i = 0U; (i < n_targets) && (i < (uint8_t)CFG_DEVICE_MAX); i++)
     {
         const cfg_device_t *d = &cfg->devices[idx[i]];
-        uint8_t uid3[3];
+        uint8_t uid3[CFG_UID_BYTES];
         uint8_t payload[LEVEL_GEAR_PAYLOAD_MAX];
         uint8_t plen;
         uint16_t code = 0U;          /* ★ uint16: 错误码是 1003/1007 三位数 */
@@ -2692,7 +3170,7 @@ int lora_business_apply_gear_ex(uint8_t gear, const char *only_uid,
         {
             g_gear_tx_skip++;
             code = 1007U;
-            log_info("[GEAR] !! devices[%u].uid=%s 不是 3 字节 hex, 跳过\r\n",
+            log_info("[GEAR] !! devices[%u].uid=%s 不是 26 位 hex 串, 跳过\r\n",
                      (unsigned)idx[i], d->uid);
         }
         else

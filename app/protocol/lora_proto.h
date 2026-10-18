@@ -108,21 +108,41 @@ bool     LoraApp_WaitTxDone(uint32_t timeout_ms);
 #define LORA_FRAME_HEAD1        0x55U
 #define LORA_PROTO_VER          0x01U
 
-/* 帧结构(与控制端/设备端 app_cmd.c / app_sensor.c 完全一致, 共 11 字节帧头 + 2 字节 CRC):
- *   [0]AA [1]55 [2]ver [3..5]gw_uid [6..8]dev_uid [9]func [10]data_len [11..]data [..]crc16
+/* 帧结构(与控制端/设备端 app_cmd.c / app_sensor.c 完全一致, 共 31 字节帧头 + 2 字节 CRC):
+ *   [0]AA [1]55 [2]ver [3..15]gw_uid [16..28]dev_uid [29]func [30]data_len [31..]data [..]crc16
  *
- * ⚠️ 恒定开销 = 11(帧头部分) + 2(CRC) = 13 —— 这里原先错写成 14, 结果:
+ * ★★2026-10-18: UID 由 3 字节扩到 13 字节 ⇒ 帧头 11 -> 31, 开销 13 -> 33 ★★
+ *   用户口径: "LORA 的总帧长保持 240" ⇒ 载荷上限随之从 240 降到 207。
+ *   ⚠️ 连带必须改的两处(否则档位载荷装不下):
+ *        LEVEL_GEAR_PAYLOAD_MAX  210 -> 206   (207 - 1, 留 1B 给 func)
+ *        LEVEL_GEAR_TEXT_BUDGET  203 -> ~199
+ *   ⚠️ 设备端(app_cmd.c / app_sensor.c)【必须同步】改成 (33 + data_len) == rx_len,
+ *      且两边的 gw_uid/dev_uid 都要按 13 字节收发。新旧不互通。
+ *
+ * ⚠️ 历史上这里曾错写成 14, 结果:
  *     上报帧按 14+7=21 算, 实收 20 -> 长度校验必然失败 -> 帧被静默丢弃
  *     -> 帧回调从不被调用 -> 表现成"网关一直收到帧但永远不回 ACK"。
- *    设备端 app_cmd.c 用的就是 13(13 + data_len), 网关必须与之对齐。
- *    改这里务必同步设备端: 设备侧那句判据是 (13 + data_len) == rx_len。 */
-#define LORA_FRAME_OVERHEAD     13U
-/* 无载荷时的最小帧长(即 11 + 0 + 2), 用于解析前的最低长度检查 */
+ *     ⇒ 常量必须与设备端的判据【逐字节】一致, 改这里务必同步设备端。 */
+#define LORA_UID_BYTES          13U     /* = CFG_UID_BYTES = PARAM_UID_BYTES */
+#define LORA_FRAME_OVERHEAD     33U     /* 2 头 + 1 版本 + 13 gw + 13 dev + 1 func + 1 dlen + 2 CRC */
+/* 无载荷时的最小帧长(即 31 + 0 + 2), 用于解析前的最低长度检查 */
 #define LORA_FRAME_HDR_SIZE     LORA_FRAME_OVERHEAD
-/* 载荷长度上限（声光报警器带 LED+TTS 的 GB2312 文本） */
-#define LORA_FRAME_DATA_MAX     240U
+/* 载荷长度上限（声光报警器带 LED+TTS 的 GB2312 文本）
+ * 2026-10-18: 240 -> 207（总帧长保持 240: 240 - 33 = 207） */
+#define LORA_FRAME_DATA_MAX     207U
 /* 完整帧缓冲大小 */
 #define LORA_FRAME_RAW_MAX      (LORA_FRAME_OVERHEAD + LORA_FRAME_DATA_MAX)
+
+/* ===== 帧内字段偏移（2026-10-18: 全部由常量算出，禁止再写死数字）=====
+ * 布局: [0]AA [1]55 [2]ver [3..15]gw [16..28]dev [29]func [30]dlen [31..]data [..]crc
+ * ⚠️ 以前这些偏移是【写死的 3/6/9/10/11】—— 把 UID 改成 13 字节时,
+ *    只要漏改一处, 帧就会【静默错位】(解析出来 func 是 UID 的一个字节),
+ *    而且编译期完全看不出来。⇒ 现在一律用下面的宏。 */
+#define LORA_OFF_GW_UID         3U
+#define LORA_OFF_DEV_UID        (LORA_OFF_GW_UID  + LORA_UID_BYTES)     /* 16 */
+#define LORA_OFF_FUNC           (LORA_OFF_DEV_UID + LORA_UID_BYTES)     /* 29 */
+#define LORA_OFF_DLEN           (LORA_OFF_FUNC + 1U)                    /* 30 */
+#define LORA_OFF_DATA           (LORA_OFF_DLEN + 1U)                    /* 31 */
 
 /* CRC 覆盖范围: 从 ver 到 data 末尾 (跳过帧头 2B + 跳过末尾 CRC 2B)
  *  = 完整帧总长 - 4 */
@@ -170,10 +190,27 @@ bool     LoraApp_WaitTxDone(uint32_t timeout_ms);
 #define LORA_ADDR_GET_TYPE(byte)          (((byte) >> 4) & 0x0FU)
 #define LORA_ADDR_GET_ENV(byte)           ((byte) & 0x0FU)
 
-/* 辅助: 把 3B 地址 (type_env byte + 2B 编号大端) 拆出来 */
-static inline uint8_t lora_addr_type(const uint8_t uid[3]) { return LORA_ADDR_GET_TYPE(uid[0]); }
-static inline uint8_t lora_addr_env(const uint8_t uid[3])  { return LORA_ADDR_GET_ENV(uid[0]); }
-static inline uint16_t lora_addr_num(const uint8_t uid[3]) { return ((uint16_t)uid[1] << 8) | (uint16_t)uid[2]; }
+/* 辅助: 从 13 字节 UID 里取类型/环境
+ * ★2026-10-18: UID 由 3 字节扩到 13 字节(byte0 类型 + 12 字节芯片 96 位唯一 ID)。
+ *   ⇒ lora_addr_type()/lora_addr_env() 语义不变(仍只看 byte0)。
+ *   ⇒ ⚠️ lora_addr_num() 【已失去意义】并【已删除】——
+ *        原来它是 "byte1<<8 | byte2" 的 2 字节编号; 现在 byte1..12 是 96 位芯片 UID,
+ *        用 uint16 根本装不下。寻址改成"13 字节全等比较"(memcmp), 不再按编号。
+ *      ⇒ 原来所有用 lora_addr_num() 的地方都已改成直接比 UID。 */
+static inline uint8_t lora_addr_type(const uint8_t uid[LORA_UID_BYTES]) { return LORA_ADDR_GET_TYPE(uid[0]); }
+static inline uint8_t lora_addr_env(const uint8_t uid[LORA_UID_BYTES])  { return LORA_ADDR_GET_ENV(uid[0]); }
+
+/** 两个 13 字节 UID 是否相同 —— 取代原来的 lora_addr_num() 比较 */
+static inline bool lora_uid_equal(const uint8_t a[LORA_UID_BYTES], const uint8_t b[LORA_UID_BYTES])
+{
+    uint8_t i;
+    if ((a == NULL) || (b == NULL)) { return false; }
+    for (i = 0u; i < LORA_UID_BYTES; i++)
+    {
+        if (a[i] != b[i]) { return false; }
+    }
+    return true;
+}
 
 /* ==================== 功能码 ==================== */
 
@@ -184,6 +221,19 @@ typedef enum
     LORA_FUNC_SET_ALARM          = 0x03U,   /* 云端→网关→声光报警器 设置声光报警器 */
     LORA_FUNC_BIND_REQ           = 0x04U,   /* 设备→网关广播 绑定请求(目标地址=FFFFFF) */
     LORA_FUNC_UNBIND             = 0x05U,   /* 网关→设备 解绑通知 */
+    /* ★2026-10-18 新增: 出厂字段读写(仅产线/开发者用, 与云端无关)★
+     * 字段 = 10 字节 ASCII, 例 "YA26420001"(Y=液位, A, 年26, 周42, 编号0001);
+     * 网关自己的出厂值是 "WANGGUAN00"。
+     *   · 0x06 网关→设备: data = 10 字节字段   => 设备回 0x80(成功)/0x81(失败)
+     *   · 0x07 网关→设备: data 为空            => 设备回 0x08(data = 10 字节字段)
+     *   · 0x08 设备→网关: data = 10 字节字段   => 网关【必须回 0x80】做 ack
+     * 设备侧 0x07 的处理(用户 2026-10-18 定): 发 0x08 后开 5 秒窗口等网关 ack;
+     *   没收到就再发一次 + 再等 5 秒, 之后不管收没收到都回主流程(最多发 2 次)。
+     * ⚠️ 0x80/0x81 是纯应答码(不带"应答的是哪个 func"), 所以设备端处理 0x06/0x07
+     *    时必须【串行等 ack】, 不能与别的下发交错 —— 否则 ack 会被张冠李戴。 */
+    LORA_FUNC_SET_FIELD          = 0x06U,   /* 网关→设备 写入出厂字段 */
+    LORA_FUNC_GET_FIELD          = 0x07U,   /* 网关→设备 读取出厂字段(请求) */
+    LORA_FUNC_FIELD_RESP         = 0x08U,   /* 设备→网关 字段应答(data = 字段) */
     LORA_FUNC_OTA                = 0x70U,   /* 云端→网关→设备 OTA 升级（格式待补充） */
     LORA_FUNC_RESP_OK            = 0x80U,   /* 双向 正常应答("收到了", 不代表执行成功) */
     LORA_FUNC_RESP_ERR           = 0x81U,   /* 双向 错误/重传应答 */
@@ -211,8 +261,8 @@ typedef enum
  */
 typedef struct
 {
-    uint8_t gw_uid[3];          /* 网关地址 */
-    uint8_t dev_uid[3];         /* 设备地址 */
+    uint8_t gw_uid[LORA_UID_BYTES];     /* 网关地址(13 字节: 类型 + 96 位芯片 UID) */
+    uint8_t dev_uid[LORA_UID_BYTES];    /* 设备地址(13 字节, 同上) */
     uint8_t func;               /* 功能码 */
     uint8_t data_len;           /* 载荷长度 */
     uint8_t data[LORA_FRAME_DATA_MAX];  /* 载荷 */

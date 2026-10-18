@@ -1,0 +1,14 @@
+# Normalize line endings: the firmware sources are checked in as LF and the
+# Keil project / host-test scripts tolerate LF. This keeps `git diff` clean
+# when editors on Windows save CRLF.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending converted.
+*.bin binary
+*.pdf binary
+*.docx binary
+*.hex binary
+*.axf binary
+*.pack binary
+*.lib binary
+*.a   binary

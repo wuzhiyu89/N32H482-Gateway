@@ -52,7 +52,7 @@ extern "C" {
 #endif
 
 /* ==================== 字段长度上限(文档取值列) ==================== */
-#define CFG_GWID_MAX        20      /* system.gwId        ≤20 字节 */
+#define CFG_GWID_MAX        26      /* system.gwId        ≤26 字节(2026-10-18: 改成 26 位 hex UID) */
 #define CFG_SYSPWD_MAX      32      /* system.password    ≤32 字节 */
 #define CFG_HOST_MAX        64      /* network.host       ≤64 字节 */
 #define CFG_CLIENTID_MAX    32      /* network.clientId   ≤32 字节 */
@@ -79,7 +79,7 @@ extern "C" {
  *
  * ⚠ 这里是【唯一的定义处】: level_eval.h 的 LEVEL_GEAR_TEXT_BUDGET 只是它的别名,
  *   两边不一致会有编译期断言报错(见 level_eval.h)。改预算只改这一行。 */
-#define CFG_GEAR_TEXT_BUDGET   203u
+#define CFG_GEAR_TEXT_BUDGET   199u
 
 /* 数组长度(文档 3.3 / 3.5 / 3.6) */
 #define CFG_SENSOR_MAX      5       /* 液位传感器 1~5。
@@ -95,32 +95,53 @@ extern "C" {
 #define CFG_DEVICE_MAX      5       /* devices[] 0~5(文档一致) */
 #define CFG_GEAR_COUNT      4       /* gears[]   固定 0~3 */
 
-/* ==================== 子设备寻址: 3 字节 UID(不用文档的 uint16 addr) ====================
+/* ==================== 子设备寻址: 13 字节 UID（2026-10-18 由 3 字节扩到 13） ====================
  *
- * 文档 3.3/3.6 的地址字段是 `addr`(uint16, 1~255), 但本工程实际的子设备寻址是
- * 【3 字节 UID】(param_slave_uid_t{ uint8_t uid[3]; }), 例如 110001 -> 0x11 0x00 0x01。
- * uint16 装不下 3 字节, 两者无法调和。
+ * 文档 3.3/3.6 的地址字段是 `addr`(uint16, 1~255), 但本工程实际用【UID】寻址。
  *
- * 用户 2026-09-27 决策: "现在的设备地址完全不用改动, 会联系云端让云端修改",
- * 并确认 JSON 里用【十六进制字符串】形式, 如 "uid":"110001"。
+ * ★★2026-10-18 用户决定: UID 从 3 字节扩成 13 字节★★
+ *   形式 = byte0(类型/环境) + 12 字节芯片自带的 96 位唯一 ID(GetUID() 读)
+ *     网关       : 0x11 + 96 位
+ *     液位传感器 : 0x21 + 96 位
+ *     声光报警器 : 0x31 + 96 位
+ *   hex 串形式就是 26 个字符, 例如 "11A1B2C3D4E5F60718293A4B5C6D7E8F" 这种长度。
  *
- * 实现选择: 结构体里直接存 6 个 hex 字符 + '\0' 的字符串, 而不是 uint8_t[3]。
+ *   【为什么要 96 位】芯片自带唯一 ID, 每个芯片不同 ⇒ 不怕地址重复、不用人工编号。
+ *
+ *   【不兼容旧的 3 字节 UID】用户 2026-10-18 明确: 研发阶段, 不会再有 3 字节 UID,
+ *     旧设备要重新烧录。⇒ cfg_uid_valid() 只认 26 位 hex, 不做"两种长度都接受"。
+ *
+ *   ⚠️ byte0 的编码约定(与旧 3 字节格式保持同一套语义):
+ *      高 4 位 = 设备类型(1 网关 / 2 液位 / 3 声光), 低 4 位 = 环境(现在一律 0)。
+ *      现在实际取值: 网关 0x11 / 液位 0x21 / 声光 0x31。
+ *
+ * 实现选择: 结构体里直接存 26 个 hex 字符 + '\0' 的字符串, 而不是 uint8_t[13]。
  *   · JSON 侧就是直接的字符串拷贝, 不需要编解码胶水;
  *   · 唯一性/相等判断 = strcmp, 不需要 memcmp + 长度;
  *   · 真正要发给 LoRa 时再用 cfg_uid_to_bytes() 解一次(只在下发路径上)。
- * 代价是每个设备多占 4 字节 RAM, 在这个量级上完全无所谓。
+ * 代价是每个设备多占 20 字节 RAM(13→26 字符), 在这个量级上完全无所谓。
  */
-#define CFG_UID_HEX_LEN     6                       /* "110001" */
-#define CFG_UID_STR_MAX     (CFG_UID_HEX_LEN + 1)   /* 含 '\0' */
+#define CFG_UID_BYTES       13                          /* 二进制形式: 1 类型 + 12 字节 96 位 UID */
+#define CFG_UID_HEX_LEN     (CFG_UID_BYTES * 2)         /* 26 个 hex 字符 */
+#define CFG_UID_STR_MAX     (CFG_UID_HEX_LEN + 1)       /* 含 '\0' */
 
-/** 校验 hex 串形式: 必须 6 个 hex 字符且不全为 0("000000" 视为无效地址) */
+/** 校验 hex 串形式: 必须 26 个 hex 字符且不全为 0("全 0" 视为无效地址=擦除态) */
 bool cfg_uid_valid(const char *uid_hex);
 
-/** "110001" -> {0x11,0x00,0x01}; 格式非法返回 false */
-bool cfg_uid_to_bytes(const char *uid_hex, uint8_t out[3]);
+/**
+ * @brief 注册"读芯片 96 位 UID"的钩子 —— 出厂 gwId / clientId 用它生成（2026-10-18）
+ * @param fn 由 main.c 注册（内部调厂商 GetUID()）；NULL = 撤销
+ * @note  【为什么要 hook】config_store.c 在主机测试里也编译，而 GetUID() 是厂商函数
+ *        ⇒ 直接调会让主机 build 链接失败。目标构建拿到真 UID；主机测试拿 0。
+ *        与本文件里 param_save_set_uid_hook() 同一套路。
+ */
+void config_store_set_uid_hook(void (*fn)(uint8_t out[12]));
 
-/** {0x11,0x00,0x01} -> "110001"(大写); out 至少 CFG_UID_STR_MAX 字节 */
-void cfg_uid_from_bytes(const uint8_t in[3], char *out_hex);
+/** 26 位 hex 串 -> {13 字节}; 格式非法返回 false */
+bool cfg_uid_to_bytes(const char *uid_hex, uint8_t out[CFG_UID_BYTES]);
+
+/** {13 字节} -> 26 位 hex 串(大写); out 至少 CFG_UID_STR_MAX 字节 */
+void cfg_uid_from_bytes(const uint8_t in[CFG_UID_BYTES], char *out_hex);
 
 /* ==================== 枚举(内部用 uint8, JSON 里用字符串) ==================== */
 typedef enum { CFG_MEASURE_LEVEL = 0, CFG_MEASURE_DISTANCE = 1 } cfg_measure_mode_t;
@@ -205,7 +226,7 @@ typedef struct
 /** 3.3 sensors[] 单元素 */
 typedef struct
 {
-    char     uid[CFG_UID_STR_MAX];      /* 3 字节 UID 的 hex 串, 如 "110001" */
+    char     uid[CFG_UID_STR_MAX];      /* 13 字节 UID 的 26 位 hex 串 */
     char     serial[CFG_SERIAL_MAX + 1];/* 文档字段; 用户决策 D-4: 本工程不启用 */
     char     name[CFG_NAME_MAX + 1];
     uint8_t  measure_mode;              /* cfg_measure_mode_t; D-1 决策后为死配置 */
@@ -261,7 +282,7 @@ typedef struct
 /** 3.6 devices[] 单元素 */
 typedef struct
 {
-    char     uid[CFG_UID_STR_MAX];      /* 3 字节 UID 的 hex 串 */
+    char     uid[CFG_UID_STR_MAX];      /* 13 字节 UID 的 26 位 hex 串 */
     char     serial[CFG_SERIAL_MAX + 1];/* 文档字段; 用户决策 D-4: 本工程不启用 */
     char     name[CFG_NAME_MAX + 1];
     uint8_t  type;                      /* cfg_dev_type_t, 只读 */
@@ -519,6 +540,31 @@ cfg_result_t config_store_bind_device(const char *uid_hex, const char *serial,
  * @note  连带清理 gears[].target_uid 里指向该 uid 的条目(与 cloud_cmd_unbind 同口径)
  */
 cfg_result_t config_store_unbind_device(const char *uid_hex, uint32_t now_unix);
+
+/**
+ * @brief 重绑(同 UID 换新设备): 只更新元数据, 【不新增】条目（2026-10-14 新增）
+ * @param uid_hex  设备的 13 字节 UID(26 位 hex 串)
+ * @param serial   新序列号(可 NULL, 当空串)
+ * @param name     新名称(可 NULL, 当空串)
+ * @param dev_type 设备类型(仅对 devices[] 生效; 液位传感器忽略)
+ * @param now_unix 当前 Unix 秒(用于 updated_at + 版本递增)
+ * @return CFG_OK; CFG_ERR_PARAM(uid 非法); CFG_ERR_RANGE(该 UID 不在配置里)
+ *
+ * 【为什么要它】config_store_bind_device() 查重后对已存在的 UID 直接返回
+ *   CFG_ERR_RANGE, 所以没法用来"覆盖"。
+ * 【用户场景(2026-10-14)】设备坏了换新, 重新烧录后回到同一默认地址
+ *   ⇒ 允许同 UID 再绑一次, 但条目数不变。
+ * 【覆盖什么】serial / name(设备侧还有 type)。
+ * 【刻意不动什么】report_period_s / offline_timeout_s / enabled / low_battery_pct
+ *   / measure_mode / install_height_cm / calib_offset_mm —— 用户口径:
+ *   平台一定会再下发上报周期, 网关不需要动(动了反而把平台设的值悄悄改回 60)。
+ * ⚠️【不要】用 unbind + bind 代替本函数 —— unbind 会连带清掉 gears[].target_uid
+ *   里指向该 UID 的条目(见上面那条的 note), 那台设备以后收不到联动指令
+ *   (现象: 能绑定、能上报, 就是不动灯)。
+ */
+cfg_result_t config_store_rebind_device(const char *uid_hex, const char *serial,
+                                        const char *name, uint8_t dev_type,
+                                        uint32_t now_unix);
 
 /* ==================== 诊断(日志口 #cfg 用) ==================== */
 /** 打印一行摘要: 版本/传感器数/设备数/阈值/规则 */

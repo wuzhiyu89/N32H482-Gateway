@@ -28,6 +28,37 @@
 #include "log.h"
 #include "utils.h"
 
+/* ★2026-10-18 (甲): 设备 ID 从 6 位改成 13 字节 UID 的 26 位 hex。
+ *   gwId / clientId 都取 "11" + 芯片 96 位唯一 ID(24 hex)。
+ *   ⇒ MQTT 主题 rt/gw/<26位>/... , clientId 也是同一个值。
+ *   hook 未注册(主机测试)时退化成 "11" + 22 个 0 —— 长度仍是 26, 校验能过。 */
+static void (*s_gw_uid_hook)(uint8_t out[12]);
+
+void config_store_set_uid_hook(void (*fn)(uint8_t out[12]))
+{
+    s_gw_uid_hook = fn;
+}
+
+/** 生成 26 位 hex 的出厂设备 ID（"11" + 12 字节芯片 UID） */
+static void cfg_default_gw_id(char out[27])
+{
+    static const char HEX[] = "0123456789ABCDEF";
+    uint8_t u[12];
+    uint8_t i;
+
+    for (i = 0u; i < 12u; i++) { u[i] = 0u; }
+    if (s_gw_uid_hook != NULL) { s_gw_uid_hook(u); }
+
+    out[0] = '1';
+    out[1] = '1';
+    for (i = 0u; i < 12u; i++)
+    {
+        out[2u + (i * 2u)]      = HEX[(u[i] >> 4) & 0x0Fu];
+        out[2u + (i * 2u) + 1u] = HEX[u[i] & 0x0Fu];
+    }
+    out[26] = '\0';
+}
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>     /* strtoul: 解析 meta.crc32 的 HEX 字符串 */
@@ -431,7 +462,7 @@ void config_store_factory_default(config_store_t *c)
      *   · MQTT 主题   rt/gw/110001/cmd ...
      *   · MQTT 用户名 (甲方平台按用户名认设备)
      * 后续可用 cfg.set 改(system.gwId), 改完【网关重启】才生效(主题在建链前拼好)。 */
-    (void)strcpy(c->system.gw_id, "110001");        /* 出厂设定 = 设备 ID */
+    cfg_default_gw_id(c->system.gw_id);             /* 2026-10-18: "11" + 芯片 96 位 UID(26 位 hex) */
     c->system.password[0] = '\0';                   /* 空 = 不校验 */
     c->system.timezone    = 8;                      /* +8 */
 
@@ -453,7 +484,7 @@ void config_store_factory_default(config_store_t *c)
     (void)strcpy(c->network.host, "223.75.207.139");
     c->network.port         = 1883u;
     c->network.tls          = 0u;
-    (void)strcpy(c->network.client_id, "110001");   /* 原来空 = 运行时用 gwId, 效果相同, 现在写明 */
+    cfg_default_gw_id(c->network.client_id);        /* 2026-10-18: 与 gwId 同值(26 位 hex UID) */
     (void)strcpy(c->network.username, "tuguan");
     /* ⚠️ 明文密码, 且 cfg.query 会原样返回它。若不愿暴露, 两个办法:
      *   ① 保持空 -> 沿用 g4_at.c 的编译期默认值(功能一样, 只是查询看不到);
@@ -559,7 +590,7 @@ void config_store_factory_default(config_store_t *c)
 
 /* ==================== 校验 ==================== */
 
-/* ==================== 3 字节 UID(hex 串)工具 ==================== */
+/* ==================== 13 字节 UID(hex 串)工具 ==================== */
 
 static int cfg_hex_val(char ch)
 {
@@ -575,6 +606,7 @@ bool cfg_uid_valid(const char *uid_hex)
     bool    any_nonzero = false;
 
     if (uid_hex == NULL) { return false; }
+    /* ★2026-10-18: 只认 26 位 hex(13 字节) —— 旧 3 字节格式不再兼容, 见 config_store.h */
     if (strlen(uid_hex) != CFG_UID_HEX_LEN) { return false; }
 
     for (i = 0u; i < CFG_UID_HEX_LEN; i++)
@@ -582,18 +614,18 @@ bool cfg_uid_valid(const char *uid_hex)
         if (cfg_hex_val(uid_hex[i]) < 0) { return false; }
         if (uid_hex[i] != '0') { any_nonzero = true; }
     }
-    /* "000000" 是空地址 —— 擦除态/未绑定, 不能当合法设备地址 */
+    /* 全 0 是空地址 —— 擦除态/未绑定, 不能当合法设备地址 */
     return any_nonzero;
 }
 
-bool cfg_uid_to_bytes(const char *uid_hex, uint8_t out[3])
+bool cfg_uid_to_bytes(const char *uid_hex, uint8_t out[CFG_UID_BYTES])
 {
     uint8_t i;
 
     if ((uid_hex == NULL) || (out == NULL)) { return false; }
     if (!cfg_uid_valid(uid_hex)) { return false; }
 
-    for (i = 0u; i < 3u; i++)
+    for (i = 0u; i < CFG_UID_BYTES; i++)
     {
         int hi = cfg_hex_val(uid_hex[i * 2u]);
         int lo = cfg_hex_val(uid_hex[(i * 2u) + 1u]);
@@ -602,16 +634,16 @@ bool cfg_uid_to_bytes(const char *uid_hex, uint8_t out[3])
     return true;
 }
 
-void cfg_uid_from_bytes(const uint8_t in[3], char *out_hex)
+void cfg_uid_from_bytes(const uint8_t in[CFG_UID_BYTES], char *out_hex)
 {
     static const char HEX[] = "0123456789ABCDEF";
     uint8_t i;
 
     if ((in == NULL) || (out_hex == NULL)) { return; }
 
-    for (i = 0u; i < 3u; i++)
+    for (i = 0u; i < CFG_UID_BYTES; i++)
     {
-        out_hex[i * 2u]       = HEX[(in[i] >> 4) & 0x0Fu];
+        out_hex[i * 2u]        = HEX[(in[i] >> 4) & 0x0Fu];
         out_hex[(i * 2u) + 1u] = HEX[in[i] & 0x0Fu];
     }
     out_hex[CFG_UID_HEX_LEN] = '\0';
@@ -2005,6 +2037,81 @@ static bool cfg_find_device(const config_store_t *c, const char *uid_hex,
         }
     }
     return false;
+}
+
+/* ★★2026-10-14 新增: 重绑(同 UID 换新设备) —— 只更新元数据, 【不新增】条目 ★★
+ * --------------------------------------------------------------------------
+ * 【为什么必须单独一个函数】config_store_bind_device() 一开头就查重、已存在直接
+ *   返回 CFG_ERR_RANGE(见它上面那段), 所以它【没法】用来覆盖一个已存在的 UID。
+ *
+ * 【用户场景(2026-10-14)】设备坏了换新, 重新烧录后回到同一默认地址
+ *   ⇒ 网关必须允许同 UID 再绑一次, 但从机表里【不能出现两条】。
+ *
+ * 【用户口径, 三条】
+ *   ① serial/name 用绑定窗口(sen.bind/dev.bind)里的新值【覆盖】;
+ *   ② 【不】动 report_period_s 等运行参数 —— 平台一定会再下发一次上报周期,
+ *      等于给新设备设一遍, 网关不需要动(动了反而会把平台设的值悄悄改回 60);
+ *   ③ 条目数不变(本函数只改现有条目的字段)。
+ *
+ * ⚠️ 必须【保留】的字段: report_period_s / offline_timeout_s / enabled /
+ *    low_battery_pct / measure_mode / calib_offset_mm / install_height_cm。
+ *    它们与"这台设备是谁"无关, 是运行参数。
+ *
+ * ⚠️【不要】图省事写成 config_store_unbind_device() + config_store_bind_device()
+ *    "先删再建" —— unbind 会连带清掉 gears[].target_uid 里指向该 UID 的条目
+ *    (见 config_store.h 的说明), 那台设备以后收不到联动指令
+ *    (现象: 能绑定、能上报, 就是不动灯 —— 极难查)。
+ *
+ * @return CFG_OK; CFG_ERR_PARAM(uid 非法); CFG_ERR_RANGE(该 UID 不在配置里)
+ * @note   调用方(lora_business 的绑定状态机)只在【运行期从机表里已有该 UID】时
+ *         才调它; 真"新设备"应走 config_store_bind_device()。 */
+cfg_result_t config_store_rebind_device(const char *uid_hex, const char *serial,
+                                        const char *name, uint8_t dev_type,
+                                        uint32_t now_unix)
+{
+    config_store_t *c;
+    uint8_t         idx       = 0u;
+    bool            is_sensor = false;
+
+    if ((uid_hex == NULL) || (!cfg_uid_valid(uid_hex)))
+    {
+        return CFG_ERR_PARAM;
+    }
+    /* serial/name 允许 NULL(当空串处理) —— 与 config_store_bind_device 同口径 */
+    if (serial == NULL) { serial = ""; }
+    if (name == NULL)   { name = ""; }
+
+    c = config_store_get_mut();
+    if (!cfg_find_device(c, uid_hex, &is_sensor, &idx))
+    {
+        return CFG_ERR_RANGE;       /* 未找到(与 config_store_unbind_device 同口径) */
+    }
+
+    if (is_sensor)
+    {
+        cfg_sensor_t *s = &c->sensors[idx];
+        (void)strncpy(s->serial, serial, sizeof(s->serial) - 1u);
+        s->serial[sizeof(s->serial) - 1u] = '\0';
+        (void)strncpy(s->name, name, sizeof(s->name) - 1u);
+        s->name[sizeof(s->name) - 1u] = '\0';
+        /* ★ 刻意【不动】: report_period_s / offline_timeout_s / enabled /
+         *   low_battery_pct / measure_mode / install_height_cm / calib_offset_mm
+         *   —— 见上面口径②。 */
+        (void)dev_type;             /* 液位传感器没有 type 字段 */
+    }
+    else
+    {
+        cfg_device_t *d = &c->devices[idx];
+        (void)strncpy(d->serial, serial, sizeof(d->serial) - 1u);
+        d->serial[sizeof(d->serial) - 1u] = '\0';
+        (void)strncpy(d->name, name, sizeof(d->name) - 1u);
+        d->name[sizeof(d->name) - 1u] = '\0';
+        /* 设备类型允许在重绑时改(平台可能换了一台不同类型的设备) */
+        d->type = dev_type;
+    }
+
+    config_store_touch(c, now_unix);    /* 版本 +1 + updated_at(平台的乐观锁靠它) */
+    return config_store_save(c);
 }
 
 cfg_result_t config_store_bind_device(const char *uid_hex, const char *serial,

@@ -31,8 +31,8 @@ extern "C" {
 
 /* ---- 字段容量(含 '\0') ---- */
 #define CLOUD_HOST_MAX      48
-#define CLOUD_CLIENTID_MAX  24
-#define CLOUD_GWID_MAX      24
+#define CLOUD_CLIENTID_MAX  27
+#define CLOUD_GWID_MAX      27
 #define CLOUD_PREFIX_MAX    24
 #define CLOUD_AUTH_MAX      32
 

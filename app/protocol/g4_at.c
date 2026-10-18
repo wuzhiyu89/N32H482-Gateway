@@ -320,7 +320,10 @@
  *        mqtt_build_conn_cmd 的说明)
  */
 #ifndef G4_MQTT_CLIENT_ID
-#define G4_MQTT_CLIENT_ID        "110001"
+/* ★2026-10-18: 26 位(= "11" + 24 个 0)。真实值由 network.clientId 覆盖
+ * (出厂 = "11" + 芯片 96 位 UID, 见 config_store 的 cfg_default_gw_id)。
+ * 这里只作"配置里没给 clientId"时的兜底, 长度必须与 26 位 gwId 一致。 */
+#define G4_MQTT_CLIENT_ID        "11000000000000000000000000"
 #endif
 /* ★2026-10-08: 下面两个"历史遗留 topic"已【整体删除】★
  *   · "mod/mod_upload" —— 旧的 LoRa 0x02 原始帧 hex 上行通道(与 mod/telemetry 重复)。

@@ -184,7 +184,7 @@ void level_dispatch_mark(level_dispatch_state_t *d, uint8_t gear,
  * ------------------------------------------------------------------------- */
 
 /** 下发缓存每台设备 211 字节, 其中 1 字节给 func -> 载荷上限 210 */
-#define LEVEL_GEAR_PAYLOAD_MAX   210U
+#define LEVEL_GEAR_PAYLOAD_MAX   206U
 /** 固定头 4 字节([0]总电源 [1]灯光模式 [2]音量 [3]LED屏模式)。
  *  ★★注意是 4, 不是 5★★ 《声光报警器对接》的偏移表是:
  *      [4] = 文本1长度 —— 也就是【第一个长度字节在固定头之外】。
@@ -197,8 +197,8 @@ void level_dispatch_mark(level_dispatch_state_t *d, uint8_t gear,
 /* ★2026-10-08: 三段文本的合计字节预算(唯一真相源在 config_store.h)★
  * 这里只做别名 + 编译期钉子: 两处不一致直接编不过, 避免"改了预算却漏改校验"。 */
 #define LEVEL_GEAR_TEXT_BUDGET    CFG_GEAR_TEXT_BUDGET
-#if (LEVEL_GEAR_TEXT_BUDGET != 203u)
-#error "LEVEL_GEAR_TEXT_BUDGET 必须与 CFG_GEAR_TEXT_BUDGET 一致(都是 203)"
+#if (LEVEL_GEAR_TEXT_BUDGET != 199u)
+#error "LEVEL_GEAR_TEXT_BUDGET 必须与 CFG_GEAR_TEXT_BUDGET 一致(都是 199)"
 #endif
 /* 载荷能装下 固定头4 + 三个长度字节 + 文本203 = 210 */
 #if ((LEVEL_GEAR_HDR_LEN + 3u + LEVEL_GEAR_TEXT_BUDGET) != LEVEL_GEAR_PAYLOAD_MAX)

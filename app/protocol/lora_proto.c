@@ -444,7 +444,8 @@ static bool parse_frame_impl(const uint8_t *raw, uint16_t raw_len, lora_frame_t 
 
     /* 4. data_len 合法性 */
     {
-        uint8_t data_len = raw[10];
+        /* ★2026-10-18: 偏移由宏算(原写死 raw[10]) —— UID 3->13 后字段整体后移 */
+        uint8_t data_len = raw[LORA_OFF_DLEN];
         if (data_len > LORA_FRAME_DATA_MAX) return false;
         expected      = LORA_FRAME_LEN(data_len);
         out->data_len = data_len;
@@ -460,17 +461,19 @@ static bool parse_frame_impl(const uint8_t *raw, uint16_t raw_len, lora_frame_t 
         if (crc_calc != crc_recv) return false;
     }
 
-    /* 7. 字段拆包 */
-    out->gw_uid[0]  = raw[3];
-    out->gw_uid[1]  = raw[4];
-    out->gw_uid[2]  = raw[5];
-    out->dev_uid[0] = raw[6];
-    out->dev_uid[1] = raw[7];
-    out->dev_uid[2] = raw[8];
-    out->func       = raw[9];
+    /* 7. 字段拆包 ★2026-10-18: gw/dev 各 13 字节, 用宏偏移 + 循环 ★ */
+    {
+        uint8_t i;
+        for (i = 0u; i < LORA_UID_BYTES; i++)
+        {
+            out->gw_uid[i]  = raw[LORA_OFF_GW_UID  + i];
+            out->dev_uid[i] = raw[LORA_OFF_DEV_UID + i];
+        }
+    }
+    out->func       = raw[LORA_OFF_FUNC];
     if (out->data_len > 0U)
     {
-        memcpy(out->data, &raw[11], out->data_len);
+        memcpy(out->data, &raw[LORA_OFF_DATA], out->data_len);
     }
     memcpy(out->raw, raw, expected);
     out->raw_len = (uint8_t)expected;
@@ -495,18 +498,21 @@ bool lora_proto_build_frame(lora_frame_t *frame, uint8_t *raw_out)
     r[0]  = LORA_FRAME_HEAD0;
     r[1]  = LORA_FRAME_HEAD1;
     r[2]  = LORA_PROTO_VER;
-    r[3]  = frame->gw_uid[0];
-    r[4]  = frame->gw_uid[1];
-    r[5]  = frame->gw_uid[2];
-    r[6]  = frame->dev_uid[0];
-    r[7]  = frame->dev_uid[1];
-    r[8]  = frame->dev_uid[2];
-    r[9]  = frame->func;
-    r[10] = frame->data_len;
+    /* ★2026-10-18: gw/dev 各 13 字节, 用宏偏移 + 循环(原写死 r[3..8]) */
+    {
+        uint8_t i;
+        for (i = 0u; i < LORA_UID_BYTES; i++)
+        {
+            r[LORA_OFF_GW_UID  + i] = frame->gw_uid[i];
+            r[LORA_OFF_DEV_UID + i] = frame->dev_uid[i];
+        }
+    }
+    r[LORA_OFF_FUNC] = frame->func;
+    r[LORA_OFF_DLEN] = frame->data_len;
 
     if (frame->data_len > 0U)
     {
-        memcpy(&r[11], frame->data, frame->data_len);
+        memcpy(&r[LORA_OFF_DATA], frame->data, frame->data_len);
     }
 
     uint8_t raw_len = (uint8_t)LORA_FRAME_LEN(frame->data_len);
@@ -744,7 +750,7 @@ void lora_proto_poll(void)
                      (unsigned)len,
                      (unsigned)g_rx_buf[0], (unsigned)g_rx_buf[1],
                      (unsigned)((len > 2U) ? g_rx_buf[2] : 0U),
-                     (unsigned)((len > 10U) ? g_rx_buf[10] : 0U));
+                     (unsigned)((len > LORA_OFF_DLEN) ? g_rx_buf[LORA_OFF_DLEN] : 0U));
         }
     }
 }

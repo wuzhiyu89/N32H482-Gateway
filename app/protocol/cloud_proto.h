@@ -157,7 +157,7 @@ uint16_t cloud_proto_build_status_data(char *out, uint16_t cap, const cloud_stat
 
 /* ==================== telemetry.report 数据段(文档 7.1) ==================== */
 
-/** 一台传感器的遥测数据。uid 用本工程口径(3 字节 hex 串), 文档里写的是 addr。 */
+/** 一台传感器的遥测数据。uid 用本工程口径(26 位 hex 串), 文档里写的是 addr。 */
 typedef struct
 {
     const char *uid;
@@ -210,7 +210,7 @@ uint16_t cloud_proto_build_status_change_data(char *out, uint16_t cap,
 
 /* ==================== event.device 数据段(文档 7.4) ==================== */
 
-/** 子设备事件。uid 是本工程口径(3 字节 hex 串); dev_type 用 "sensor"/"device" */
+/** 子设备事件。uid 是本工程口径(26 位 hex 串); dev_type 用 "sensor"/"device" */
 typedef struct
 {
     const char *uid;
@@ -222,7 +222,7 @@ typedef struct
      * "是哪一台设备出的事"(serial 是现场贴在设备上的号)。
      * 可空: NULL 时【整个字段不输出】(不编空串冒充)。
      * addr 那一项: 本工程用 uid 代替(偏差 D-4, 用户已确认) —— uint16 的 addr
-     * 装不下 3 字节 UID。 */
+     * 装不下 13 字节 UID。 */
     const char *serial;
 } cloud_device_event_t;
 

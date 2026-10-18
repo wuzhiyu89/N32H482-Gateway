@@ -82,14 +82,14 @@ typedef enum
 /* ========== 从机固定配置(只读, 定义在 lora_business.c) ========== */
 typedef struct
 {
-    uint8_t      dev_uid[3];    /* 3 字节地址, 与 "210001" 这种 6 位 hex 串一致 */
+    uint8_t      dev_uid[LORA_UID_BYTES];    /* 13 字节地址(类型 + 96 位芯片 UID), hex 串 26 字符 */
     slave_type_t dev_type;      /* SLAVE_TYPE_SENSOR / SLAVE_TYPE_ALARM_OUT */
 } lora_slave_cfg_t;
 
 /* ========== LoRa 从机信息 ========== */
 typedef struct
 {
-    uint8_t            dev_uid[3];       /* 设备唯一UID (3B) */
+    uint8_t            dev_uid[LORA_UID_BYTES];       /* 设备唯一 UID (13B) */
     slave_type_t       dev_type;         /* SLAVE_TYPE_SENSOR / SLAVE_TYPE_ALARM_OUT */
     bool               is_online;        /* 是否在线(收到过帧) */
     uint32_t           last_recv_tick;   /* 上次收到上行帧的 tick ms */
@@ -120,7 +120,102 @@ typedef struct
     uint8_t            alarm_attempts;    /* 本条动作已经发了几次(上限 3) */
     uint8_t            alarm_gear;        /* 本次动作的档位(上报 event.action 要用) */
     uint32_t           alarm_tick;        /* 本条发出的时刻(判 15 秒超时) */
+
+    /* ★2026-10-18 (丙): 这台声光是否【已经报过"离线"】且还没恢复 ★
+     *   置 true  : _alarm_on_fail() 里 3 条配额用完、判定它离线的那一刻;
+     *   清 false : 收到 0x82 执行成功时(并在那一次回调里带 recovered=true,
+     *              让主程序补一条 event.device{"online"})。
+     * 【为什么要这个位】原来只有失败那一次发 event.device{"offline"},
+     *   设备后来恢复了也【没有任何"恢复"事件】—— 平台侧的离线告警会一直
+     *   挂着, 只能靠人工确认。有了这个位, 恢复的第一时间就能自动补报。 */
+    bool               alarm_offline_reported;
 } lora_slave_t;
+
+/* ========== 设备在线状态查询(★2026-10-18 新增) ==========
+ * 【为什么需要它】sen.query / dev.query 的 online 字段原来是"看 last_value 快照
+ *   + 3×上报周期"算的 —— 那只对【液位传感器】成立。声光报警器从不发 0x02,
+ *   所以它永远不进快照表 ⇒ dev.query 里声光的 online 恒为 false, 哪怕它刚刚
+ *   执行成功过。平台据此判断"设备掉线"就会一直误报。
+ *
+ * 【本函数的判据】直接查从机表的真实状态, 两种设备各用各的口径:
+ *     · 液位传感器(SLAVE_TYPE_SENSOR)    : lora_slave_t.is_online
+ *       (由 sensor_offline 状态机维护, 与失联检测完全同一套)
+ *     · 声光报警器(SLAVE_TYPE_ALARM_OUT) : !alarm_offline_reported
+ *       (只有"3 条 0x03 都没成功"才置位, 收到 0x82 就清掉 —— 这是网关对声光
+ *        唯一确凿的死活证据; 不用 last_recv_tick, 因为声光平时不收帧会误判)
+ *   不在从机表里 ⇒ UNKNOWN(调用方自己决定怎么兜底)。 */
+typedef enum
+{
+    LORA_DEV_STATE_UNKNOWN = 0,     /* 从机表里没有这台(可能刚解绑/还没绑) */
+    LORA_DEV_STATE_ONLINE  = 1,     /* 在线 */
+    LORA_DEV_STATE_OFFLINE = 2      /* 已判定离线 */
+} lora_dev_state_t;
+
+/**
+ * \brief 按 uid(26 位 hex 串) 查这台设备在网关眼里是在线还是离线
+ * \param uid_hex 26 位 hex 串(大写); NULL / 非法 -> UNKNOWN
+ * \note  不阻塞、不碰网络, 只读从机表。
+ */
+lora_dev_state_t lora_business_device_state(const char *uid_hex);
+
+/**
+ * \brief 同上, 但直接给【字节形式】的 uid —— 给已经在遍历从机表的调用方用
+ *        (例如 main.c 的 main_fill_status: 它手里就是 lora_slave_t.dev_uid)
+ * \param uid 13 字节 uid; NULL -> UNKNOWN
+ * \note  ★2026-10-18: status.report 的 sensorsOnline/devicesOnline 与本函数
+ *        统一口径, 避免"dev.query 说离线、status.report 说在线"的自相矛盾。
+ */
+lora_dev_state_t lora_business_device_state_bytes(const uint8_t uid[LORA_UID_BYTES]);
+
+/* ==========================================================================
+ * ★★2026-10-18 新增: 出厂字段的写入 / 读取(只给产线/开发者, 与云端无关)★★
+ * ==========================================================================
+ * 字段 = 10 字节 ASCII(例 "YA26420001" / "WANGGUAN00"), 由产线在本机写进设备。
+ * 用户口径:
+ *   · 写(0x06): 每 5 秒发一次, 最多 3 次; 期间收到设备 0x80 就停止并判成功;
+ *               3 次都没收到 -> 判失败。0x81 = 设备明确拒绝, 立即判失败。
+ *   · 读(0x07): 网关【只发一次】, 然后等约 12 秒 —— 设备侧自己会重发 0x08
+ *               两次(各带 5 秒窗口), 网关不必再重发 0x07。
+ *   · 收到 0x08(带 10 字节字段) => 【必须回 0x80】, 并把字段交给结果回调。
+ *   · 目标设备: 从机表里【唯一】那一台(产线一次只接一台);
+ *               0 台或多台 -> begin 返回 false, 调用方负责提示先 #bind / 先解绑。
+ * ⚠️ 这套东西【不入云端、不入 event_cache、不进 data_cache】—— 用户明确要求
+ *    "只有我们开发者知道", 所以它只走空口 + 串口。
+ * ========================================================================== */
+#define LORA_FIELD_LEN   10U
+
+/**
+ * \brief 字段操作结果回调
+ * \param ok       true = 写成功 / 读成功
+ * \param field10  读成功时是设备回的 10 字节字段(本模块会补 '\0', 可当 C 串用);
+ *                 写操作或失败时是空串
+ */
+typedef void (*lora_field_result_fn)(bool ok, const char *field10);
+
+/** 注册字段操作结果回调; 传 NULL 取消 */
+void lora_business_set_field_result_cb(lora_field_result_fn fn);
+
+/**
+ * \brief 开始"写字段": 目标 = 从机表里唯一那台设备
+ * \param field10 必须【恰好 10 字节】, 字符集不校验(用户要求)
+ * \return false = 参数不对 / 从机表不是正好 1 台 / 已有字段操作在进行
+ * \note  返回 true 后立即发第一条 0x06; 之后由 lora_business_field_poll() 推进
+ */
+bool lora_business_field_write_begin(const char *field10);
+
+/**
+ * \brief 开始"读字段": 目标 = 从机表里唯一那台设备
+ * \return false = 从机表不是正好 1 台 / 已有字段操作在进行
+ */
+bool lora_business_field_read_begin(void);
+
+/**
+ * \brief 推进字段操作(重发 / 超时判定)。主循环高频调用即可, 内部自己按 5s 节流。
+ */
+void lora_business_field_poll(void);
+
+/** 取消进行中的字段操作(不发任何帧, 只清状态) */
+void lora_business_field_cancel(void);
 
 /* ========== 对外 API ========== */
 
@@ -143,20 +238,20 @@ void lora_business_poll(void);
  * \param ok       true → 0x80 OK; false → 0x81 错误
  * \param err_code 错误码 (仅 ok=false 时有效)
  */
-bool lora_business_send_ack(const uint8_t gw_uid[3], const uint8_t dev_uid[3],
+bool lora_business_send_ack(const uint8_t gw_uid[LORA_UID_BYTES], const uint8_t dev_uid[LORA_UID_BYTES],
                             uint8_t func, bool ok, uint8_t err_code);
 
 /**
  * \brief 上层业务调用: 存入下发缓存, 不直接发送
  *        等待设备下次上报上行帧时, poll 会自动取出并发送
- * \param uid      目标从机 UID (3B)
+ * \param uid      目标从机 UID (13B)
  * \param dev_type 设备类型 (sensor/alarm_out)
  * \param func     功能码 (0x01 设置传感器 / 0x03 设置声光)
  * \param data     载荷 (不含 CRC, 协议层会自动加)
  * \param data_len 载荷长度
  * \return 0 成功; -1 载荷过长; -2 找不到从机
  */
-int lora_business_send_req(const uint8_t uid[3], slave_type_t dev_type,
+int lora_business_send_req(const uint8_t uid[LORA_UID_BYTES], slave_type_t dev_type,
                            uint8_t func, const uint8_t *data, uint8_t data_len);
 
 /**
@@ -229,6 +324,32 @@ typedef void (*lora_sensor_event_fn)(const char *uid_hex, bool online);
 void lora_business_set_sensor_event_cb(lora_sensor_event_fn fn);
 
 /* ==========================================================================
+ * ★★2026-10-18 新增: 每次液位上报(0x02)的原始数据回调★★
+ * ==========================================================================
+ * \param uid      该设备的 13 字节 uid(不是 hex 串 —— 调用方常常直接要字节)
+ * \param level_mm 本次上报的水位(mm, 设备原值, 网关不换算)
+ * \param bat_pct  电量百分比
+ * \param rssi_dbm 该帧的 LoRa RSSI
+ *
+ * 【为什么需要它】离线期间的水位数据以前是【直接丢掉的】:
+ *   main_telemetry_step() 一开头就 `if (!g4_at_is_online()) return;`, 断线期间
+ *   根本不生成遥测。而 LoRa 与 4G 独立, 液位照常上报 ⇒ 这些数据白丢。
+ *   现在业务层每收到一条有效 0x02 就回调一次, 主程序在【离线时】把这条存进
+ *   telemetry_cache, 重连后按原时间戳逐条补报。
+ *
+ * 【调用时机】在 handle_sensor_report() 里, 长度校验通过之后(残帧不算上报),
+ *   与 data_cache_up_push() 相邻 —— 那条是 last_value 快照的漏斗, 这条是补报的漏斗。
+ *
+ * \note 回调里【不要阻塞】。不注册时什么也不做(不影响主循环)。
+ */
+typedef void (*lora_level_report_fn)(const uint8_t uid[LORA_UID_BYTES],
+                                     uint16_t level_mm, uint8_t bat_pct,
+                                     int8_t rssi_dbm);
+
+/** 注册"每次液位上报"回调; 传 NULL 取消 */
+void lora_business_set_level_report_cb(lora_level_report_fn fn);
+
+/* ==========================================================================
  * ★★2026-10-08 新增: 声光执行结果回调(用户 A1/A3)★★
  * ==========================================================================
  * 声光设备收到 0x03 后会先后回两条: 0x80(收到了) → 0x82(成功) / 0x83(失败)。
@@ -242,6 +363,11 @@ void lora_business_set_sensor_event_cb(lora_sensor_event_fn fn);
  *                  ⇒ 调用方除了上报 event.action{失败}, 还应额外上报一条
  *                     event.device{"offline"}(设备离线)
  *                  false = 还在重试, 这次失败只是中间态
+ * \param recovered ★2026-10-18 (丙) 新增★
+ *                  true  = 这一次 ok=true, 而且【之前已经报过这台设备离线】
+ *                          ⇒ 调用方除了 event.action{成功}, 还应【补报一条
+ *                            event.device{"online"}】(设备恢复)
+ *                  false = 普通结果(从没离线过, 或已经是离线的重复失败)
  *
  * 【调用时机】每条 0x03 有且只有一次 gave_up=true(或者一次 ok=true 收尾)。
  *   中间的重试【不】回调 —— 免得平台看到三次"失败"却其实第三次成功了。
@@ -250,7 +376,7 @@ void lora_business_set_sensor_event_cb(lora_sensor_event_fn fn);
  * \note 回调里【不要阻塞】。不注册时只打日志, 不影响主循环。
  */
 typedef void (*lora_alarm_result_fn)(const char *uid_hex, uint8_t gear,
-                                     bool ok, bool gave_up);
+                                     bool ok, bool gave_up, bool recovered);
 
 /** 注册声光执行结果回调; 传 NULL 取消 */
 void lora_business_set_alarm_result_cb(lora_alarm_result_fn fn);
@@ -346,7 +472,7 @@ void lora_business_set_bind_event_cb(lora_bind_event_fn fn);
  * \return true 成功打开; false 参数非法或已有窗口进行中
  *
  * ★★ 一个窗口只能配【一台】设备(2026-09-30 用户明确定下) ★★
- *   原因: 子设备的 0x04 配对请求帧里【只有 3 字节 UID, 没有 serial】——
+ *   原因: 子设备的 0x04 配对请求帧里【只有 13 字节 UID, 没有 serial】——
  *   网关无法拿云端下发的 serial 去校验"来的到底是不是平台要的那台"。
  *   所以规则就是: 窗口打开期间, **第一个发 0x04 的设备被绑定**, 窗口随即结束;
  *   平台侧【一个窗口只申请一台】, 要配两台就开两次窗口。
@@ -410,7 +536,7 @@ typedef struct
 {
     /* 本头文件有意不 include config_store.h(保持业务层不依赖配置层),
      * 所以这里用一个本地长度: 6 位 hex + '\0' + 余量。 */
-    char     uid[8];
+    char     uid[27];      /* 2026-10-18: UID 扩到 13 字节 => hex 串 26 字符 + NUL */
     uint16_t code;                  /* ★ 必须是 uint16: 错误码是 1003/1007 这种三位数
                                      *   (2026-09-30 用 uint8_t 时被静默截成 239, 编译
                                      *    警告抓出来的) */

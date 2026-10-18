@@ -116,7 +116,7 @@ void cloud_profile_set_factory_default(cloud_profile_t *p)
      * (特殊值 "IMEI" = 用模组 IMEI)。本字段当前【没有消费者】, 留空以免出现
      * "两个地方都能配 clientID、谁生效说不清"。 */
     p->client_id[0] = '\0';
-    (void)memcpy(p->gw_id, "110001", sizeof("110001"));
+    (void)memcpy(p->gw_id, "11000000000000000000000000", sizeof("11000000000000000000000000"));   /* 2026-10-18: 26 位; 真实值由 config_store 注入 */
     (void)memcpy(p->topic_prefix, "rt/gw", sizeof("rt/gw"));
     p->auth[0] = '\0';
 }
@@ -144,7 +144,7 @@ int cloud_profile_validate(const cloud_profile_t *p)
     {
         return 4;
     }
-    if ((strlen(p->gw_id) > 20u) || (strpbrk(p->gw_id, "/+#") != NULL))
+    if ((strlen(p->gw_id) > 26u) || (strpbrk(p->gw_id, "/+#") != NULL))
     {
         return 4;
     }
