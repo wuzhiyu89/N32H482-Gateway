@@ -959,6 +959,7 @@
                 <Group>
                   <GroupName>app\core</GroupName>
                   <Files>
+
                     <File>
                       <FileName>app_state.c</FileName>
                       <FileType>1</FileType>
@@ -968,6 +969,21 @@
                       <FileName>app_state.h</FileName>
                       <FileType>5</FileType>
                       <FilePath>..\app\core\app_state.h</FilePath>
+                    </File>
+                    <File>
+                      <FileName>app_config.h</FileName>
+                      <FileType>5</FileType>
+                      <FilePath>..\app\core\app_config.h</FilePath>
+                    </File>
+                                      <File>
+                      <FileName>app_core.h</FileName>
+                      <FileType>5</FileType>
+                      <FilePath>..\app\core\app_core.h</FilePath>
+                    </File>
+                    <File>
+                      <FileName>app_console.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_console.c</FilePath>
                     </File>
                   </Files>
                 </Group>
@@ -1935,6 +1951,11 @@
                       <FileName>app_state.h</FileName>
                       <FileType>5</FileType>
                       <FilePath>..\app\core\app_state.h</FilePath>
+                    </File>
+                    <File>
+                      <FileName>app_config.h</FileName>
+                      <FileType>5</FileType>
+                      <FilePath>..\app\core\app_config.h</FilePath>
                     </File>
                   </Files>
                 </Group>
