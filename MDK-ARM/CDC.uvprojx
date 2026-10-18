@@ -769,16 +769,6 @@
               <FileType>5</FileType>
               <FilePath>..\app\protocol\cloud_proto.h</FilePath>
             </File>
-            <File>
-              <FileName>json_proto.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\app\protocol\json_proto.c</FilePath>
-            </File>
-            <File>
-              <FileName>json_proto.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\app\protocol\json_proto.h</FilePath>
-            </File>
           </Files>
         </Group>
         <Group>
@@ -840,16 +830,6 @@
           <GroupName>app\ota</GroupName>
           <Files>
             <File>
-              <FileName>ota.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\app\ota\ota.c</FilePath>
-            </File>
-            <File>
-              <FileName>ota.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\app\ota\ota.h</FilePath>
-            </File>
-            <File>
               <FileName>ota_port.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\app\ota\ota_port.c</FilePath>
@@ -880,6 +860,16 @@
               <FilePath>..\app\ota\ota_http.h</FilePath>
             </File>
             <File>
+              <FileName>ota_meta.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\app\ota\ota_meta.h</FilePath>
+            </File>
+            <File>
+              <FileName>ota_mark.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\app\ota\ota_mark.h</FilePath>
+            </File>
+            <File>
               <FileName>ota_health.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\app\ota\ota_health.c</FilePath>
@@ -888,21 +878,6 @@
               <FileName>ota_health.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\app\ota\ota_health.h</FilePath>
-            </File>
-          </Files>
-        </Group>
-        <Group>
-          <GroupName>app\bootloader</GroupName>
-          <Files>
-            <File>
-              <FileName>bootloader.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\app\bootloader\bootloader.c</FilePath>
-            </File>
-            <File>
-              <FileName>bootloader.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\app\bootloader\bootloader.h</FilePath>
             </File>
           </Files>
         </Group>
@@ -1706,16 +1681,6 @@
               <FileType>5</FileType>
               <FilePath>..\app\protocol\cloud_proto.h</FilePath>
             </File>
-            <File>
-              <FileName>json_proto.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\app\protocol\json_proto.c</FilePath>
-            </File>
-            <File>
-              <FileName>json_proto.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\app\protocol\json_proto.h</FilePath>
-            </File>
           </Files>
         </Group>
         <Group>
@@ -1777,16 +1742,6 @@
           <GroupName>app\ota</GroupName>
           <Files>
             <File>
-              <FileName>ota.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\app\ota\ota.c</FilePath>
-            </File>
-            <File>
-              <FileName>ota.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\app\ota\ota.h</FilePath>
-            </File>
-            <File>
               <FileName>ota_port.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\app\ota\ota_port.c</FilePath>
@@ -1817,6 +1772,16 @@
               <FilePath>..\app\ota\ota_http.h</FilePath>
             </File>
             <File>
+              <FileName>ota_meta.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\app\ota\ota_meta.h</FilePath>
+            </File>
+            <File>
+              <FileName>ota_mark.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\app\ota\ota_mark.h</FilePath>
+            </File>
+            <File>
               <FileName>ota_health.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\app\ota\ota_health.c</FilePath>
@@ -1825,21 +1790,6 @@
               <FileName>ota_health.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\app\ota\ota_health.h</FilePath>
-            </File>
-          </Files>
-        </Group>
-        <Group>
-          <GroupName>app\bootloader</GroupName>
-          <Files>
-            <File>
-              <FileName>bootloader.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\app\bootloader\bootloader.c</FilePath>
-            </File>
-            <File>
-              <FileName>bootloader.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\app\bootloader\bootloader.h</FilePath>
             </File>
           </Files>
         </Group>

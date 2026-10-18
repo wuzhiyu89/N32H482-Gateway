@@ -64,7 +64,7 @@ try {
         # 是那个头文件本身的既有写法, 与 OTA 无关, 所以只压掉这一类。
         '-Wno-type-limits',
         '-I_host_test/stub', '-Iapp/protocol', '-Iapp/business', '-Iapp/common',
-        '-Iapp/ota', '-Iapp/bootloader',
+        '-Iapp/ota',
         '-Iapp/ring_buf', '-Iapp/cjson', '-Iapp/radio/llcc68', '-I_host_test', '-Iinc'
         # -Iapp/ota 是 OTA over HTTP 这条线加的: md5.h 在 app/ota, 且后续
         # ota_http.c 也要在这一层做主机测试(状态机可以喂假 URC 跑)。

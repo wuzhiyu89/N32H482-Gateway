@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 #include "ota_port.h"
-#include "bootloader.h"   /* ota_mark_t 的定义在 bootloader.h */
+#include "ota_mark.h"   /* ota_mark_t 的定义在 bootloader.h */
 #include "flash_map.h"
 
 /* ==================== 假 Flash ==================== */

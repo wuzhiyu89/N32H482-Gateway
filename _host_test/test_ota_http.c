@@ -25,7 +25,7 @@
 #include "g4_urc.h"
 #include "ring_buf.h"
 #include "bsp_uart.h"
-#include "bootloader.h"
+#include "ota_mark.h"
 #include "flash_map.h"
 #include "md5.h"
 

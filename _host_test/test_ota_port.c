@@ -26,7 +26,6 @@
 #include <stdint.h>
 
 #include "ota_port.h"
-#include "ota.h"
 #include "flash_map.h"
 #include "storage.h"
 

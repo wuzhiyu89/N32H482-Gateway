@@ -24,6 +24,11 @@
 #include "bsp_tim.h"           /* get_tick_ms */
 #include <string.h>
 
+/* 续传记录的合法性上界: 每个分包至少 512 字节, 所以 packet_count 不可能超过
+ * OTA_FLASH_SIZE / 512。这个 512 来自旧的 MQTT 分包版(已归档), 这里只是拿它
+ * 当"最小分包"下界用, 与当前 HTTP 通道的分块大小无关。 */
+#define OTA_PACKET_PAYLOAD_MAX   512u
+
 /* ==================== Flash 擦除(分步异步,每次擦一页) ====================
  * 复用 storage_flash_erase_page: 内部已做 0x2000 对齐检查 + 中断保护 +
  * Unlock/Lock 配对。ota_port 只需维护"下一页地址"和"已擦页数"两个计数器。

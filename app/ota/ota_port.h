@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "ota.h"   /* ota_meta_t 定义在此(协议层类型,移植层持久化时引用) */
+#include "ota_meta.h"   /* ota_meta_t 定义在此(ota_port 持久化时引用) */
 #include "flash_map.h"  /* 分区地址唯一真相源 */
 
 /**

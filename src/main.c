@@ -71,8 +71,9 @@
  * ============================ 已知限制 ============================
  *   1) g4_at.c 目前只订阅一个主题(G4_MQTT_SUB_TOPIC), 云端下发必须发到该主题
  *      才能被 lora_mqtt_recv_cb 收到; OTA 的 ota/cmd、ota/data 主题尚未订阅。
- *   2) OTA 需要 App 链接到 0x08002000(bootloader 跳转地址), 当前 Keil IROM1
- *      仍是 0x08000000, 因此默认关闭(MAIN_OTA_ENABLE=0)。
+ *   2) OTA 已改用 HTTP 通道(ota_http.c); 但当前是分区模式 1
+ *      (FM_HAS_BOOTLOADER=0), 板上没有 bootloader, 校验通过后只能停在 READY,
+ *      不能真把新固件装进运行区。要真安装: 切模式 2 + 先烧 BL。
  *   3) 【2026-09 结构性改版后】g4_at_poll() 内的 AT 收发已全部非阻塞, 接收由
  *      g4_io_pump() 统一消费; 仍然"阻塞"的只剩日志口手工诊断(#at/#vbat/#dial)
  *      和 g4_at_get_clock() —— 它们内部照样跑收包泵, 因此不会丢接收, 只会让
@@ -80,12 +81,8 @@
  *   4) 云端下发必须是【原始二进制帧】, 长度对上协议帧(data_len 在帧里)。若云端
  *      改发 ASCII hex 文本, g4_io 的收包器会按 <payload_len> 把 hex 文本的前一半
  *      当 payload —— 两种格式必须和云端约定死一种(见 g4_io.h 顶部)。
- *   5) USB 主机功能已停用: 不调用 USBH_Init(), 但 usbh_*.c/usbhs_*.c 仍在工程里
- *      参与编译(usbh_user.c 引用 USBHS_Core/USB_Host, 符号定义在
- *      src/usbhs_bsp.c 末尾)。要彻底瘦身就把这些源文件从工程里移出, 连同那块
- *      定义一起删。
- *   6) json_proto.c 已无调用者(云端改成发二进制帧, 不再发 JSON), 可以把它从
- *      Keil 工程里移出; 不移也不占 Flash(armlink 会丢掉未引用段)。
+ *   5) USB 主机功能已停用并移出工程(archive/legacy/usb-host/); json_proto 同样
+ *      已归档(archive/legacy/json-proto/)。
  *
  * ==================== 【最小 LoRa 收发隔离测试】MAIN_LORA_RAW_TEST ====================
  *   现场"网关收不到对端任何一帧"的排障用开关(默认见 app/radio/llcc68/project_config.h):
@@ -123,7 +120,6 @@
 #include "lora_proto.h"
 #include "lora_business.h"
 #include "serial_proto.h"
-#include "ota.h"
 #include "ota_http.h"     /* OTA over HTTP(S): AT+MHTTP* + MD5, 见 app/ota/ota_http.c */
 #include "ota_port.h"     /* ota_port_reboot(): 校验通过后交给 bootloader 搬运 */
 #include "ota_health.h"   /* 2026-10-11: A/B 回滚判定+计数(开机 boot_step / 主循环 poll) */
@@ -163,12 +159,9 @@
 #ifndef MAIN_SERIAL_INIT_ENABLE
 #define MAIN_SERIAL_INIT_ENABLE  1   /* 初始化 RS232/RS485(协议待定, 仅建通道) */
 #endif
-#ifndef MAIN_OTA_ENABLE
-#define MAIN_OTA_ENABLE          0   /* 旧的 MQTT 分包版 ota.c —— 保留但不再接线 */
-#endif
-/* OTA over HTTP(S) 通道(ota_http.c) —— 2026-10-02 起是【当前通道】, 由
- * cloud_proto 的 ota.start 驱动, 不受上面 MAIN_OTA_ENABLE 控制。
- * 这里只留两个上报节拍相关的参数。 */
+/* OTA 只有一条通道: over HTTP(S)(ota_http.c), 由 cloud_proto 的 ota.start 驱动。
+ * 旧的 MQTT 分包版 ota.c 已于 2026-10-18 移入 archive/legacy/ota-mqtt/。
+ * 这里只留进度上报的节拍参数。 */
 #ifndef MAIN_OTA_PROGRESS_MS
 #define MAIN_OTA_PROGRESS_MS     10000u  /* ota.progress 最长静默期(文档 7.6: 10% 或 10s) */
 #endif
@@ -3930,11 +3923,6 @@ int main(void)
              (unsigned)OTA_HTTP_CHUNK, (unsigned)OTA_HTTP_FRAG_SIZE,
              (unsigned)OTA_HTTP_FRAG_INTV);
 
-#if MAIN_OTA_ENABLE
-    ota_init();
-    log_info("[BOOT] OTA(MQTT 分包版)也已初始化 —— 但与 cloud_proto 无连接线\r\n");
-#endif
-
     /* ==========================================================================
      * ★★2026-10-11: A/B 回滚判定(开机一次)★★
      * --------------------------------------------------------------------------
@@ -3949,11 +3937,8 @@ int main(void)
      *   ⇒ 好处: 现在(模式 1)就能把判定+计数逻辑跑起来、用日志验证;
      *     将来切模式 2 只需改 flash_map.h 一个宏, 这段代码不用动。
      * ======================================================================== */
-    /* ⚠️ 这里【不】加 #if MAIN_OTA_ENABLE —— 踩过一次:
-     *   MAIN_OTA_ENABLE 是"旧的 MQTT 分包版 ota.c"的开关, 当前 = 0。
-     *   A/B 回滚对应的是 OTA over HTTP 那条线, 与它无关。
-     *   2026-10-11 第一版就是错包在它里面 ⇒ 整段被编译掉 ⇒ 上板看不到 [OTAHL]。
-     *   ⇒ 保持无条件编译: 模式 1 下只记录日志, 零副作用(见下面的 (乙) 说明)。 */
+    /* 无条件编译: 模式 1 下只记录日志, 零副作用(见下面的 (乙) 说明)。
+     * (旧的 MQTT 分包版 ota.c 已归档, 不再有 MAIN_OTA_ENABLE 这个开关。) */
     if (ota_health_boot_step() == OTA_HEALTH_BOOT_ROLLBACK)
     {
 #if (FM_HAS_BOOTLOADER != 0)
@@ -4184,10 +4169,6 @@ int main(void)
 
 #if MAIN_HEARTBEAT_LED
             GPIO_TogglePin(GPIOA, GPIO_PIN_8);
-#endif
-
-#if MAIN_OTA_ENABLE
-            ota_poll();
 #endif
 
             /* OTA over HTTP 的进度上报 + 就绪后复位。
