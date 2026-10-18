@@ -139,12 +139,17 @@ config_store_t cloud_cfg_staging_buf;
 
 /**
  * @brief cfg.query —— 文档 5.2
- *   参数: sections(字符串数� 缺省 ["all"])
- *   应答 data = 配置 JSON(�meta), 即配置对象本� 指定�sections 就只留那几个� *
- * 【关�sections�v55 起已按域过滤 —��下面这段注释以前写的�本期只支持全�,
- * 与实现不� 2026-09-30 �9 条一并订�
+ *   参数: sections(字符串数组, 缺省 ["all"])
+ *   应答 data = 配置 JSON(带 meta), 即配置对象本身; 指定了 sections 就只留那几个域。
+ *
+ * 【关于 sections】v55 起已按域过滤 —— 下面这段注释以前写的是"本期只支持全量",
+ * 与实现不符; 2026-09-30 第 9 条一并订正:
  *   实现: cloud_cfg_sections_mask() 把域名翻成位掩码, 再用
- *   cJSON_DeleteItemFromObject() 把没要的域从应答里删�—��语义与全量一� 只是省流量�� *   入参口径: 缺省 / ["all"] = 全量; 单个域名或域名数组都支持; 不认识的名字� *   空数组��类型不对��超长名字一�1001(绝不"悄悄少给丢�个域")� *   �数组里混了坏名字时��不部分生效】★ —��要么全给, 要么明确报错� */
+ *   cJSON_DeleteItemFromObject() 把没要的域从应答里删掉 —— 语义与全量一致, 只是省流量。
+ *   入参口径: 缺省 / ["all"] = 全量; 单个域名或域名数组都支持; 不认识的名字、
+ *   空数组、类型不对、超长名字一律 1001(绝不"悄悄少给一个域")。
+ *   【数组里混了坏名字时不做部分生效】★ —— 要么全给, 要么明确报错。
+ */
 
 
 bool cloud_proto_unix_to_calendar(uint32_t unix_ts, int32_t tz_offset_sec,
@@ -168,7 +173,8 @@ bool cloud_proto_unix_to_calendar(uint32_t unix_ts, int32_t tz_offset_sec,
         return false;
     }
 
-    /* 先加上时区偏移再拆日/秒��用 64 位是为了让负偏移(西半�也能正确落地 —��     * unix_ts �uint32, 加上负偏移后可能变成负数�*/
+    /* 先加上时区偏移再拆日/秒: 用 64 位是为了让负偏移(西半球)也能正确落地 ——
+     * unix_ts 是 uint32, 加上负偏移后可能变成负数。 */
     local = (int64_t)unix_ts + (int64_t)tz_offset_sec;
 
     /* ★ 向负无穷取整的除法 ★ 不能直接用 C 的 "/"(它向 0 取整),
@@ -181,7 +187,8 @@ bool cloud_proto_unix_to_calendar(uint32_t unix_ts, int32_t tz_offset_sec,
         days -= 1;
     }
 
-    /* civil_from_days: 天数 -> 年月�不查表��不�libc)�     * 719468 = 0000-03-01 �1970-01-01 的天� 146097 = 400 年天数��*/
+    /* civil_from_days: 天数 -> 年月日(不查表, 也不依赖 libc)。
+     * 719468 = 0000-03-01 到 1970-01-01 的天数; 146097 = 400 年的天数。 */
     z   = days + 719468;
     era = (z >= 0) ? (z / 146097) : ((z - 146096) / 146097);
     doe = (uint32_t)(z - era * 146097);                                 /* [0,146096] */
@@ -193,7 +200,7 @@ bool cloud_proto_unix_to_calendar(uint32_t unix_ts, int32_t tz_offset_sec,
     *month = (uint8_t)((mp < 10u) ? (mp + 3u) : (mp - 9u));
     if (*month <= 2u)
     {
-        y += 1u;                    /* 1/2 月属�上一年的 3 月起� */
+        y += 1u;                    /* 1/2 月属于上一年的 3 月起算 */
     }
     *year = (uint16_t)y;
 
@@ -204,7 +211,7 @@ bool cloud_proto_unix_to_calendar(uint32_t unix_ts, int32_t tz_offset_sec,
 }
 
 
-/* 取一个域名对应的� 不认识返�-1 */
+/* 取一个域名对应的位号, 不认识返回 -1 */
 static int cloud_cfg_section_bit(const char *name)
 {
     uint8_t i;
@@ -222,9 +229,10 @@ static int cloud_cfg_section_bit(const char *name)
 /**
  * @brief 解析 sections, 得出"该保留哪些域"的位掩码
  * @return CLOUD_EC_OK / CLOUD_EC_PARAM
- * @note  没给 sections -> 全都�与以前一�;
- *        "all" -> 全都� 单个域名 �域名数组 -> 只要这些;
- *        空数�/ 名字不认�/ 长度超缓�-> 1001(不猜、不静默当成 all)� */
+ * @note  没给 sections -> 全都要(与以前一致);
+ *        "all" -> 全都要; 单个域名 / 域名数组 -> 只要这些;
+ *        空数组 / 名字不认识 / 长度超缓冲 -> 1001(不猜、不静默当成 all)。
+ */
 int cloud_cfg_sections_mask(const cloud_req_t *req, uint16_t *mask)
 {
     cj_type_t t;
@@ -253,7 +261,7 @@ int cloud_cfg_sections_mask(const cloud_req_t *req, uint16_t *mask)
             return CLOUD_EC_OK;
         }
         /* ★ 必须用 int 接返回值 ★ 先转 uint8_t 再判 <0 会把 -1 变成 255,
-         *   于是未知域名被当成合� 还会产生 1u<<255 这种未定义移位��*/
+         *   于是未知域名被当成合法, 还会产生 1u<<255 这种未定义移位。 */
         bit = cloud_cfg_section_bit(s);
         if (bit < 0)
         {
@@ -302,31 +310,35 @@ int cloud_cfg_sections_mask(const cloud_req_t *req, uint16_t *mask)
 
 
 /* ==================================================================
- * sys.factory_reset 真实�文档 gateway-protocol 5.1 �4 � —��P2-5
+ * sys.factory_reset 真实实现(文档 gateway-protocol 5.1 第 4 条) —— P2-5
  * ==================================================================
  * 文档原文(参数表 + 响应):
  *   "4. `sys.factory_reset` — 恢复出厂
- *    参数: keepNetwork  bool  默认 true   保留 network �避免恢复后失�
- *    响应: code 0。其余配置域恢复出厂默认，sensors[]/devices[] 清空，configVersion 归零�
+ *    参数: keepNetwork  bool  默认 true   保留 network 域, 避免恢复后失联
+ *    响应: code 0。其余配置域恢复出厂默认，sensors[]/devices[] 清空，configVersion 归零。"
  *
  * 实现要点:
- *   1. keepNetwork 默认 true —���不带这个参数时保�network �;
- *   2. 其余 8 个域回����config_store 的出厂默�config_store_factory_default),
- *      sensors[]/devices[] 清空、configVersion 归零(工厂默认函数里就是如�;
- *   3. 【一�Flash 提交� 朢�终要落盘的那份配置先在副本里拼好再写丢��Flash,
- *      绝不出现"Flash 里短暂处�network 被清�的中间��
- *   4. 【失败就�1007� 落盘失败绝不能回 code=0 —��平台�code=0 认为已经恢复
- *      出厂, 现场丢�重启配置又回来了, 属于朢�难查�答应了却没做�;
- *   5. 落盘成功才提交给"当前配置"实例, 否则紧接睢��cfg.query 会读到旧� *      (cfg.set 在同丢�处踩过坑, 见下�cloud_cmd_cfg_set 的注�� */
+ *   1. keepNetwork 默认 true —— 不带这个参数时保留 network 域;
+ *   2. 其余 8 个域回出厂默认(config_store 的 config_store_factory_default),
+ *      sensors[]/devices[] 清空、configVersion 归零(工厂默认函数里就是如此);
+ *   3. 【一次 Flash 提交】最终要落盘的那份配置先在副本里拼好再写入 Flash,
+ *      绝不出现"Flash 里短暂处于 network 被清空"的中间态;
+ *   4. 【失败就回 1007】落盘失败绝不能回 code=0 —— 平台按 code=0 认为已经恢复
+ *      出厂, 现场一重启配置又回来了, 属于最难查的"答应了却没做";
+ *   5. 落盘成功才提交给"当前配置"实例, 否则紧接着的 cfg.query 会读到旧值。
+ *      (cfg.set 在同一个地方踩过坑, 见下面 cloud_cmd_cfg_set 的注释。)
+ */
 
 
 /* ==================================================================
  * v34+: sen.unbind / dev.unbind / rule.mode(文档 5.3/5.4/5.5)
  * ==================================================================
- * 【统丢�范式: 事务式改配置】与 cfg.set 丢�模一� 新命令一律照这个�
+ * 【统一范式: 事务式改配置】与 cfg.set 是同一套模子, 新命令一律照这个来:
  *     在副本上改 -> config_store_validate() -> config_store_touch()(版本+1)
- *     -> config_store_save() �Flash -> 成功�memcpy �当前配置"实例
- * 这样 Flash 写失败时 RAM �Flash 不会出现"丢�个变了��一个没�的分裂状态�� * 副本复用 cloud_cfg_staging_buf(1.7KB, 放栈上会�4KB 的栈); 本工程单线程轮询, 不会重入� * ================================================================== */
+ *     -> config_store_save() 落 Flash -> 成功后 memcpy 回"当前配置"实例
+ * 这样 Flash 写失败时 RAM 与 Flash 不会出现"一个变了、一个没变"的分裂状态。
+ * 副本复用 cloud_cfg_staging_buf(1.7KB, 放栈上会吃掉 4KB 的栈); 本工程单线程轮询, 不会重入。
+ * ================================================================== */
 
 /** 把配置副本落盘并提交; 失败时当前配置一个字都不动 */
 int cloud_commit_config(const config_store_t *tmp)
@@ -355,12 +367,12 @@ int cloud_commit_config(const config_store_t *tmp)
 /* ==================== 命令表(顺序 = 文档 4 章) ==================== */
 static const cloud_cmd_entry_t s_cmd_table[] =
 {
-    /* 1~4 系统�P2-5 已把 sys.factory_reset 换成真实� */
+    /* 1~4 系统类: P2-5 已把 sys.factory_reset 换成真实实现 */
     { "sys.query_status",  cloud_cmd_sys_query_status },
     { "sys.time_sync",     cloud_cmd_sys_time_sync },
     { "sys.reboot",        cloud_cmd_sys_reboot },
     { "sys.factory_reset", cloud_cmd_sys_factory_reset },
-    /* 5~6 配置�P2-4 已接真实� */
+    /* 5~6 配置类: P2-4 已接真实实现 */
     { "cfg.set",           cloud_cmd_cfg_set   },
     { "cfg.query",         cloud_cmd_cfg_query },
     /* 7~10 传感器类 */
@@ -441,8 +453,11 @@ const char *cloud_proto_ec_msg(int code)
  * ================================================================== */
 
 /*!
- * \brief �cJSON 字符串节点拷进定长缓�绝不截断)
- * \return true = 拷成� false = 缺失/非字符串/装不� * \note  v33 迁到 cJSON 后新增��原来用 cj_get_str() 是��截断��语� 而截断在 cmd � *        是危险的: "cfg.setXXXX" 会被截成 "cfg.set" 而��静默命中另丢�条命令������ *        那比"�1001"严重得多。所以这里改�装不下就失败", 由调用方判成 1001� */
+ * \brief 把 cJSON 字符串节点拷进定长缓冲(绝不截断)
+ * \return true = 拷成功; false = 缺失/非字符串/装不下
+ * \note  v33 迁到 cJSON 后新增: 原来用 cj_get_str() 是"截断"语义, 而截断在 cmd 上
+ *        是危险的: "cfg.setXXXX" 会被截成 "cfg.set" 从而静默命中另一条命令!!!
+ *        那比"回 1001"严重得多。所以这里改成"装不下就失败", 由调用方判成 1001。 */
 static bool cloud_proto_take_str(const cJSON *item, char *dst, uint16_t cap)
 {
     const char *s;
@@ -483,13 +498,15 @@ int cloud_proto_parse_req(const char *json, cloud_req_t *out)
     }
     (void)memset(out, 0, sizeof(*out));
 
-    /* 护栏: hooks 没装(忘了 cjson_port_init())就绝不能�cJSON —��它会去用�     * 512 字节的堆, 而且是��没有任何编�链接错误】的静默故障�*/
+    /* 护栏: hooks 没装(忘了 cjson_port_init())就绝不能让 cJSON 跑 —— 它会去用那
+     * 512 字节的堆, 而且是【没有任何编译/链接错误】的静默故障。 */
     if (!cjson_port_is_ready())
     {
         return CLOUD_EC_INTERNAL;
     }
 
-    /* v33: 信封解析改用 cJSON。整棵树只用�取那几个字段", 取完立刻 Delete —��     * 本工�RAM 是静态的(�24 KB, �cjson_port.h), 不留树��*/
+    /* v33: 信封解析改用 cJSON。整棵树只用"取那几个字段", 取完立刻 Delete ——
+     * 本工程的池是静态的(24 KB, 见 cjson_port.h), 不留树。 */
     root = cJSON_Parse(json);
     if ((root == NULL) || !cJSON_IsObject(root))
     {
@@ -508,8 +525,8 @@ int cloud_proto_parse_req(const char *json, cloud_req_t *out)
         rc = CLOUD_EC_PARAM;
     }
 
-    /* msgId: 文档规定必带�<=16 字节。缺�非字符串【宽容��上层与幂等层自己决定),
-     * 但超�16 字节直接�—��否则应答里带不回原�� 平台对不上��*/
+    /* msgId: 文档规定必带、<=16 字节。缺了/非字符串【宽容处理】(上层与幂等层自己决定),
+     * 但超过 16 字节直接拒 —— 否则应答里带不回原值, 平台对不上。 */
     if (rc == 0)
     {
         it = cJSON_GetObjectItemCaseSensitive(root, "msgId");
@@ -523,7 +540,7 @@ int cloud_proto_parse_req(const char *json, cloud_req_t *out)
 
     if (rc == 0)
     {
-        /* auth: 超长按��截断��处�截断后必然和密码对不�-> 1008), 不为此单独报�*/
+        /* auth: 超长按"截断"处理(截断后必然和密码对不上 -> 1008), 不为此单独报错 */
         it = cJSON_GetObjectItemCaseSensitive(root, "auth");
         if (cJSON_IsString(it))
         {
@@ -548,8 +565,10 @@ int cloud_proto_parse_req(const char *json, cloud_req_t *out)
             out->has_ts = true;
         }
 
-        /* data 仍然交出【原文指针�� 配置�config_store)这一步还在用 cloud_json �         * cj_* 取字� 直接给它 cJSON 树会牵动丢�大片。指针指向调用方�json 缓冲,
-         * 生命周期与迁移前完全丢�致��         * TODO(v33-2): 配置层也迁到 cJSON 之后, 这里改成交出 data 节点�*/
+        /* data 仍然交出【原文指针】: 配置层(config_store)这一步还在用 cloud_json 的
+         * cj_* 取字段, 直接给它 cJSON 树会牵动一大片。指针指向调用方的 json 缓冲,
+         * 生命周期与迁移前完全一致。
+         * TODO(v33-2): 配置层也迁到 cJSON 之后, 这里改成交出 data 节点。 */
         out->data = cj_get_sub(json, "data");
     }
 
@@ -560,13 +579,19 @@ int cloud_proto_parse_req(const char *json, cloud_req_t *out)
 /* ==================================================================
  * 信封生成(改用 cJSON)
  * ==================================================================
- * 【为仢�么一律用 cJSON_PrintPreallocated, 不用 cJSON_Print/PrintUnformatted� *   1) Print/PrintUnformatted 霢�要额外一�边打印边扩容"的缓�—��实测多花
- *      7.5 KB 池空��cjson_port.h 的实测表);
- *   2) 更要命的是池里没�realloc, 扩容�新分�+ 拷贝 + 释放旧块"; 池被解析� *      切碎之后很可能找不到足够大的连续�—��实测 24 KB 池下【直接失败���� *   PrintPreallocated 直接打进入调用方的静态缓� 零额外分� 也没有碎片问题�� * ================================================================== */
+ * 【为什么一律用 cJSON_PrintPreallocated, 不用 cJSON_Print/PrintUnformatted】
+ *   1) Print/PrintUnformatted 需要额外一块"边打印边扩容"的缓冲 —— 实测多花
+ *      7.5 KB 池空间(cjson_port.h 的实测表);
+ *   2) 更要命的是池里没有 realloc, 扩容是"新分配 + 拷贝 + 释放旧块"; 池被解析
+ *      切碎之后很可能找不到足够大的连续块 —— 实测 24 KB 池下【直接失败】。
+ *   PrintPreallocated 直接打进调用方的静态缓冲: 零额外分配, 也没有碎片问题。
+ * ================================================================== */
 
 /*!
- * \brief 把一�cJSON 树以【无格式】打进入调用方的静��缓� * \return 写入长度; 0 = 失败(缓冲不足/树有问题)
- * \note  失败时把 out 置成空串 —��绝不能发半条应答出去� */
+ * \brief 把一棵 cJSON 树以【无格式】打进调用方的静态缓冲
+ * \return 写入长度; 0 = 失败(缓冲不足/树有问题)
+ * \note  失败时把 out 置成空串 —— 绝不能发半条应答出去。
+ */
 uint16_t cloud_json_print(char *out, uint16_t cap, cJSON *root)
 {
     if ((out == NULL) || (cap < 2u) || (root == NULL))
@@ -583,8 +608,10 @@ uint16_t cloud_json_print(char *out, uint16_t cap, cJSON *root)
 
 /*!
  * \brief 按【文档 3 章示例的键序】往应答对象里填字段
- * \note  键序不能随手调换: 单测 [7] 是拿整条应答与文档示例����字符��比对的� *        data �cJSON_Raw 原样嵌入 —��它在 cJSON �print_value 里是 memcpy,
- *        不加引号也不二次转义, 与迁移前 cjw_raw 的行为一致�� */
+ * \note  键序不能随手调换: 单测 [7] 是拿整条应答与文档示例逐字符比对的。
+ *        data 用 cJSON_Raw 原样嵌入 —— 它在 cJSON 的 print_value 里是 memcpy,
+ *        不加引号也不二次转义, 与迁移前 cjw_raw 的行为一致。
+ */
 static bool cloud_proto_add_resp(cJSON *root, const cloud_req_t *req, int code,
                                  const char *msg, const char *data_json, uint32_t ts)
 {
@@ -633,7 +660,7 @@ uint16_t cloud_proto_build_resp(char *out, uint16_t cap, const cloud_req_t *req,
 
     if (!cloud_proto_add_resp(root, req, code, msg, data_json, ts))
     {
-        cJSON_Delete(root);             /* 任何丢�步失�池满) -> 整条应答作废 */
+        cJSON_Delete(root);             /* 任何一步失败(池满) -> 整条应答作废 */
         out[0] = '\0';
         return 0u;
     }
@@ -705,7 +732,7 @@ bool cloud_proto_looks_like_json(const uint8_t *data, uint16_t len)
     {
         return false;
     }
-    /* 必须还能找到 '}' �'"' —��免得�恰好�'{' 弢��的二进制帧误判成 JSON */
+    /* 必须还能找到 '}' 或 '"' —— 免得把恰好以 '{' 开头的二进制帧误判成 JSON */
     for (j = (uint16_t)(i + 1u); j < len; j++)
     {
         if ((data[j] == '}') || (data[j] == '"'))
@@ -723,7 +750,9 @@ bool cloud_proto_looks_like_json(const uint8_t *data, uint16_t len)
 
 
 /**
- * @brief 公历 -> 儒略日数(Hinnant 算法), 返回 1970-01-01 起算的天� * @note  �1970 之前也能给负� 本工程用不到但算法本身支持�� */
+ * @brief 公历 -> 儒略日数(Hinnant 算法), 返回 1970-01-01 起算的天数
+ * @note  1970 之前也能给负值, 本工程用不到但算法本身支持。
+ */
 static int32_t cloud_days_from_civil(int32_t y, int32_t m, int32_t d)
 {
     int32_t  era;
@@ -764,20 +793,37 @@ uint32_t cloud_proto_calendar_to_unix(uint16_t year, uint8_t month, uint8_t day,
 }
 
 /* ==================================================================
- * P1-6 msgId 幂等 —��"同一�msgId 不重复执�
+ * P1-6 msgId 幂等 —— "同一个 msgId 不重复执行"
  * ==================================================================
- * 【为仢�么必须有】云端可能把同一条命令重发一�应答在路上丢�/ MQTT QoS1 重传 /
- * 平台自己等应答超时后重试)。在此之前重发会【真的再执行丢�遍�� cfg.set 会再写一� * Flash �configVersion �+1, sys.factory_reset 会再擦一次配置��P1-6 的验收判� * 就是"重复 msgId 不重复执�� *
- * 【判据与做法� *   记住朢��CLOUD_DEDUP_SLOTS 条��已通过解析与鉴权��的 msgId, 连同它产生的应答
- *   正文原样存下来��再见到同一�msgId �
- *     · 丢�个命令处理函数都不调�—��扢�以不会有第二次副作用;
- *     · 把上次那条应答����字节��重发出�—��扢�以平台前后看到的答案是同丢�份�� *   重发时保留的是应答里【原本的 ts�同一条��辑应答), 刻意不改成当前时间�� *
- * 【为仢�么单条应答只缓存 CLOUD_DEDUP_RESP_MAX(512 B)� *   实测只有 cfg.query 的应答会超过 512 B(完整配置对象 1572 B, 满配朢���.7 KB),
- *   而它是��只读��没有副作用】的。所以缓存不下时逢�化成"照常执行丢��是��正确��的:
- *   平台照样拿到完整正文, 不会看到被截断的配置 —���为了缓存把它截断"好得多�� *   �这条推理的前提是"超过 512 B 的应答一定来自只读命�。将来若有��带副作用��的
- *     命令产生 >512 B 的应� 必须同步�CLOUD_DEDUP_RESP_MAX 调大, 否则那条命令� *     重发会被真的执行第二遍�� *
- * 【刻意不做的两件事�� *   · 不做掉电持久� 网关重启后记忆就没了, 重启前的重发会再执行丢�次��写 Flash 会带� *     磨损�重启即写"的问� 不��得 —��作为已知限制写进 v31 的说�txt� *   · 不清空在 MQTT 重连� �cloud_proto_dedup_reset() 的说明�� *
- * 【必须放在鉴权之后��重复命中检查要放在 cloud_profile_check_auth() 之后: 否则丢�� *   不带 auth(�auth �的报文只要抄丢�个见过的 msgId, 就能直接拿到上次的成功应�—�� *   那是丢�个鉴权绕过��见主机单测 [21] �重放不绕过鉴�用例� * ================================================================== */
+ * 【为什么必须有】云端可能把同一条命令重发一遍(应答在路上丢了 / MQTT QoS1 重传 /
+ * 平台自己等应答超时后重试)。在此之前重发会【真的再执行一遍】: cfg.set 会再写一次
+ * Flash 把 configVersion 再 +1, sys.factory_reset 会再擦一次配置。P1-6 的验收判据
+ * 就是"重复 msgId 不重复执行"。
+ *
+ * 【判据与做法】
+ *   记住最近 CLOUD_DEDUP_SLOTS 条【已通过解析与鉴权】的 msgId, 连同它产生的应答
+ *   正文原样存下来; 再见到同一个 msgId 时:
+ *     · 一个命令处理函数都不调 —— 所以不会有第二次副作用;
+ *     · 把上次那条应答逐字节重发出去 —— 所以平台前后看到的答案是同一份。
+ *   重发时保留的是应答里【原本的 ts】(同一条逻辑应答), 刻意不改成当前时间。
+ *
+ * 【为什么单条应答只缓存 CLOUD_DEDUP_RESP_MAX(512 B)】
+ *   实测只有 cfg.query 的应答会超过 512 B(完整配置对象 1572 B, 满配约 5.7 KB),
+ *   而它是【只读、没有副作用】的。所以缓存不下时退化成"照常执行一遍", 是【正确】的:
+ *   平台照样拿到完整正文, 不会看到被截断的配置 —— 那比"为了缓存把它截断"好得多。
+ *   【这条推理的前提是"超过 512 B 的应答一定来自只读命令"。将来若有【带副作用】的
+ *     命令产生 >512 B 的应答, 必须同步把 CLOUD_DEDUP_RESP_MAX 调大, 否则那条命令的
+ *     重发会被真的执行第二遍。】
+ *
+ * 【刻意不做的两件事】
+ *   · 不做掉电持久化: 网关重启后记忆就没了, 重启前的重发会再执行一次。写 Flash 会带来
+ *     "磨损 + 重启即写"的问题, 不划算 —— 作为已知限制写进 v31 的说明.txt。
+ *   · 不清空在 MQTT 重连时(见 cloud_proto_dedup_reset() 的说明)。
+ *
+ * 【必须放在鉴权之后】重复命中检查要放在 cloud_profile_check_auth() 之后: 否则一条
+ *   不带 auth(或 auth 错)的报文只要抄一个见过的 msgId, 就能直接拿到上次的成功应答 ——
+ *   那是一个鉴权绕过(见主机单测 [21] 的"重放不绕过鉴权"用例)。
+ * ================================================================== */
 
 #define CLOUD_DEDUP_SLOTS      4u      /* 记住最近 4 条命令 */
 #define CLOUD_DEDUP_RESP_MAX   512u    /* 单条应答缓存上限(理由见上) */
@@ -817,8 +863,8 @@ typedef struct
 } cloud_dedup_slot_t;
 
 static cloud_dedup_slot_t s_dedup[CLOUD_DEDUP_SLOTS];
-static uint8_t            s_dedup_next;     /* 环形写指� 指向朢�旧的�下次覆盖� */
-static uint32_t           s_dedup_hits;     /* 累计命中次数(只增不减, 诊断� */
+static uint8_t            s_dedup_next;     /* 环形写指针: 指向最旧的(下次覆盖) */
+static uint32_t           s_dedup_hits;     /* 累计命中次数(只增不减, 诊断用) */
 
 void cloud_proto_dedup_reset(void)
 {
@@ -834,7 +880,7 @@ uint32_t cloud_proto_dedup_hit_count(void)
 
 /*!
  * \brief 在记忆里找 msg_id; 找不到返回 NULL
- * \note  调用方保�msg_id 非空(�msgId 不参与去� �cloud_proto_handle)
+ * \note  调用方保证 msg_id 非空(空 msgId 不参与去重, 见 cloud_proto_handle)
  */
 static const cloud_dedup_slot_t *cloud_dedup_find(const char *msg_id, uint32_t now_ts)
 {
@@ -862,8 +908,10 @@ static const cloud_dedup_slot_t *cloud_dedup_find(const char *msg_id, uint32_t n
 }
 
 /*!
- * \brief 记住丢��msgId 与它产生的应�供重发时逐字节重�
- * \note  装不�> CLOUD_DEDUP_RESP_MAX)就不�—��见文件上�为什�丢�节�� *        环形覆盖: 槽满时覆盖最旧的丢�条�� */
+ * \brief 记住一个 msgId 与它产生的应答, 供重发时逐字节重放
+ * \note  装不下(> CLOUD_DEDUP_RESP_MAX)就不记 —— 见文件上方"为什么单条只缓存 512 B"。
+ *        环形覆盖: 槽满时覆盖最旧的一条。
+ */
 static void cloud_dedup_remember(const char *msg_id, int code,
                                  const char *resp, uint16_t len, uint32_t now_ts)
 {
@@ -880,7 +928,7 @@ static void cloud_dedup_remember(const char *msg_id, int code,
     idlen = strlen(msg_id);
     if (idlen >= sizeof(s_dedup[0].msg_id))
     {
-        return;                             /* 防御: 超长 msgId 不记(正常到不� */
+        return;                             /* 防御: 超长 msgId 不记(正常到不了) */
     }
 
     slot = &s_dedup[s_dedup_next];
@@ -932,7 +980,7 @@ int cloud_proto_handle(const char *json, uint32_t now_ts,
         return CLOUD_EC_PARAM;
     }
 
-    /* ---- 2. 应用层鉴�文档: 启用后不带正�auth 应答 1008) ---- */
+    /* ---- 2. 应用层鉴权(文档: 启用后不带正确 auth 应答 1008) ---- */
     if (!cloud_profile_check_auth(req.auth))
     {
         n = cloud_proto_build_resp(resp, resp_cap, &req, CLOUD_EC_AUTH,
@@ -945,8 +993,10 @@ int cloud_proto_handle(const char *json, uint32_t now_ts,
     }
 
     /* ---- 3. P1-6 幂等: 这个 msgId 是不是已经处理过了? ----
-     * 位置刻意放在【鉴权之后�� 若放在鉴权之� 丢�条不�auth(�auth �的报�     * 只要抄一个见过的 msgId 就能直接拿到上次的成功应�—��那是鉴权绕过�     * msgId 为空则不去重: parse_req �msgId 是宽容的(允许�, 而空 id 之间没有
-     * 区分� 若参与去重会�扢�有没�msgId 的命�当成同一条互相顶掉��*/
+     * 位置刻意放在【鉴权之后】: 若放在鉴权之前, 一条不带 auth(或 auth 错)的报文
+     * 只要抄一个见过的 msgId 就能直接拿到上次的成功应答 —— 那是鉴权绕过。
+     * msgId 为空则不去重: parse_req 对 msgId 是宽容的(允许空), 而空 id 之间没有
+     * 区分度, 若参与去重会把所有没有 msgId 的命令当成同一条互相顶掉。 */
     if (req.msg_id[0] != '\0')
     {
         const cloud_dedup_slot_t *hit = cloud_dedup_find(req.msg_id, now_ts);
@@ -957,8 +1007,8 @@ int cloud_proto_handle(const char *json, uint32_t now_ts,
 
             s_dedup_hits++;
 
-            /* 调用方缓冲比缓存上限(512 B)大得� 正常到不了这� 万一真到了也
-             * 【绝不能】改去执行一遍命�那就会有第二次副作用), 而是逢�化成
+            /* 调用方缓冲比缓存上限(512 B)大得多, 正常到不了这里; 万一真到了也
+             * 【绝不能】改去执行一遍命令(那就会有第二次副作用), 而是退化成
              * "只回上次的 code、不带 data", 至少保证不重复执行。 */
             if (((uint32_t)copy_len + 1u) > (uint32_t)resp_cap)
             {
@@ -991,15 +1041,17 @@ int cloud_proto_handle(const char *json, uint32_t now_ts,
     else
     {
         /* ---- v33-2: data 段改用 cJSON ----
-         * 处理函数徢�我们建好的对象里挂成� 挂完再��打进入】文件级 static �         * s_data_buf (= CFG_JSON_MAX+64, 不能放栈�—��cfg.query �data 是整份配�
-         * 满配实测 3584 B, �4KB 的栈上会�, 朢�后交给下�build_resp �cJSON_Raw
-         * 原样嵌进信封�         * 【为仢�么打完再� 而不是把对象直接挂进信封】build_resp 的对外契约是
+         * 处理函数往我们建好的对象里挂东西, 挂完再【打印进】文件级 static 的
+         * s_data_buf (= CFG_JSON_MAX+64, 不能放栈上 —— cfg.query 的 data 是整份配置,
+         * 满配实测 3584 B, 放 4KB 的栈上会炸), 最后交给下面的 build_resp 用 cJSON_Raw
+         * 原样嵌进信封。
+         * 【为什么打完再交, 而不是把对象直接挂进信封】build_resp 的对外契约是
          * "data 是一段 JSON 文本"(单测 [7] 逐字符比对就建立在这个契约上), 这样
-         * 它的签名与测试都不用� 代价只是多打丢��用的�PrintPreallocated, 不花 RAM)�*/
+         * 它的签名与测试都不用改; 代价只是多打一次(用的 PrintPreallocated, 不花 RAM)。 */
         cJSON *dobj = cJSON_CreateObject();
 
         /* cfg.set 要用"网关当前时间"写 meta.updatedAt, 而处理函数契约里没有
-         * now_ts 参数, 扢�以在这里先记下来(单线� 无重入问��*/
+         * now_ts 参数, 所以在这里先记下来(单线程, 无重入问题)。 */
         s_gw_now_ts = now_ts;
 
         if (dobj == NULL)
@@ -1027,9 +1079,10 @@ int cloud_proto_handle(const char *json, uint32_t now_ts,
     }
 
     /* ---- 文档 §8: 1002 的应答必须带 data.currentVersion ----
-     * 错误码表原文: "1002 | 配置版本冲突（expectVersion 不一� data.currentVersion
-     * 返回当前版本� —��平台据此把本地补到对的版本再重发, 少了这个字段它只能瞎猜��     * 【为仢�么按错误码统丢�处理�002 只有"版本冲突"这一种含� 放在分发出口比让
-     * 每个命令各自记得填更可靠(目前只有 cfg.set 会返�1002, 以后别的命令也可能用)�*/
+     * 错误码表原文: "1002 | 配置版本冲突（expectVersion 不一致）| data.currentVersion
+     * 返回当前版本"。—— 平台据此把本地补到对的版本再重发, 少了这个字段它只能瞎猜。
+     * 【为什么按错误码统一处理】1002 只有"版本冲突"这一种含义, 放在分发出口比让
+     * 每个命令各自记得填更可靠(目前只有 cfg.set 会返回 1002, 以后别的命令也可能用)。 */
     if (rc == CLOUD_EC_VER_CONFLICT)
     {
         int m = snprintf(s_data_buf, sizeof(s_data_buf), "{\"currentVersion\":%lu}",
@@ -1051,8 +1104,9 @@ int cloud_proto_handle(const char *json, uint32_t now_ts,
         return CLOUD_EC_INTERNAL;
     }
 
-    /* P1-6: 把这�msgId 与应答记� 供云端重发时逐字节重放��     * 只有【走到这里��的报文才占槽位 —��解析失败 / 鉴权失败的报文不� 它们本来
-     * 就没有副作用, 也没有一�值得重放的应��*/
+    /* P1-6: 把这个 msgId 与应答记下来, 供云端重发时逐字节重放。
+     * 只有【走到这里】的报文才占槽位 —— 解析失败 / 鉴权失败的报文不占: 它们本来
+     * 就没有副作用, 也没有一份值得重放的应答。 */
     cloud_dedup_remember(req.msg_id, rc, resp, n, now_ts);
 
     return rc;
