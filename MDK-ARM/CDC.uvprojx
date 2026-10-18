@@ -990,6 +990,16 @@
                       <FileType>1</FileType>
                       <FilePath>..\app\core\app_modes.c</FilePath>
                     </File>
+                    <File>
+                      <FileName>app_boot.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_boot.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>app_loop.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_loop.c</FilePath>
+                    </File>
                                       <File>
                       <FileName>app_core.h</FileName>
                       <FileType>5</FileType>
@@ -1986,6 +1996,16 @@
                       <FileName>app_modes.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\core\app_modes.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>app_boot.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_boot.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>app_loop.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_loop.c</FilePath>
                     </File>
                   </Files>
                 </Group>

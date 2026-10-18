@@ -76,6 +76,10 @@ void app_cache_status_change(uint8_t from_code, uint8_t to_code,
 void app_publish_status_change(uint8_t from_code, uint8_t to_code,
                                uint8_t gear, int32_t level_mm);
 
+/* ---------------- 启动与主循环（都不返回） -------------------------------- */
+void app_boot_run(void);   /* 上电初始化序列 */
+void app_loop_run(void);   /* 主循环，永不返回 */
+
 /* ---------------- 工程模式（不返回） -------------------------------------- */
 void app_mode_rawtest_run(void);   /* MAIN_MODE_LORA_TEST */
 void app_mode_pairing_run(void);   /* MAIN_MODE_PAIRING  */

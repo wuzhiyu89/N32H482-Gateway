@@ -44,4 +44,10 @@
 #define MAIN_OTA_PROGRESS_MS     10000u  /* ota.progress 最长静默期(文档 7.6: 10% 或 10s) */
 #endif
 
+/* 主循环节拍 / 通信参数（所有编排单元共用） */
+#define TICK_G4_POLL_MS          5U
+#define TICK_CONSOLE_MS          10U
+#define TICK_STATUS_MS           1000U
+#define MAIN_SERIAL_BAUD         115200U
+
 #endif /* APP_CONFIG_H */
