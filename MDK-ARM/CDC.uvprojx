@@ -740,6 +740,16 @@
                       <FilePath>..\app\cloud\cloud_proto.c</FilePath>
                     </File>
                     <File>
+                      <FileName>cloud_internal.h</FileName>
+                      <FileType>5</FileType>
+                      <FilePath>..\app\cloud\cloud_internal.h</FilePath>
+                    </File>
+                    <File>
+                      <FileName>cloud_uplink.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\cloud\cloud_uplink.c</FilePath>
+                    </File>
+                    <File>
                       <FileName>cloud_proto.h</FileName>
                       <FileType>5</FileType>
                       <FilePath>..\app\cloud\cloud_proto.h</FilePath>
@@ -1751,6 +1761,16 @@
                       <FileName>cloud_proto.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\cloud\cloud_proto.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>cloud_internal.h</FileName>
+                      <FileType>5</FileType>
+                      <FilePath>..\app\cloud\cloud_internal.h</FilePath>
+                    </File>
+                    <File>
+                      <FileName>cloud_uplink.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\cloud\cloud_uplink.c</FilePath>
                     </File>
                     <File>
                       <FileName>cloud_proto.h</FileName>
