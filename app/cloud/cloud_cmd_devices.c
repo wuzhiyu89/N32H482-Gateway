@@ -24,17 +24,20 @@
 
 /**
  * @brief sen.unbind / dev.unbind —— 文档 5.3 / 5.4
- *   参数: uid(本工程口� 文档写的�addr, 按用户决策一律映射成 uid)
+ *   参数: uid(本工程口径; 文档写的是 addr, 按用户决策一律映射成 uid)
  *   响应: code 0(没有 data 字段)
  *
- * 【P5 改为异步�2026-09-29):
- *   不再立刻�config_store —��先调 lora_business_unbind() 向设备发 0x05 解绑�
- *   网关在收到设备回�0x80 ACK(或重试��尽)时才真正删除 config_store + 从机�
- *   并��过事件回调触发 event.device{unbound} 上报云端。本函数只负责发起解绑请�
- *   立即返回 code 0(异步), 让云端靠"unbound 事件"确认完成, 而不是靠命令响应� *
- *   uid 没绑�-> 1003(目标设备不存�; 已有解绑在进�-> 1006(状��不允许)� *
- *   is_sensor 在异步化后已不需�lora_business 内部按从机表 dev_type 自查),
- *   保留参数是为�sen.unbind / dev.unbind 两个分发表项共用本函数�� */
+ * 【P5 改为异步(2026-09-29)】:
+ *   不再立刻改 config_store —— 先调 lora_business_unbind() 向设备发 0x05 解绑命令;
+ *   网关在收到设备回的 0x80 ACK(或重试耗尽)时才真正删除 config_store + 从机表,
+ *   并通过事件回调触发 event.device{unbound} 上报云端。本函数只负责发起解绑请求,
+ *   立即返回 code 0(异步), 让云端靠"unbound 事件"确认完成, 而不是靠命令响应。
+ *
+ *   uid 没绑过 -> 1003(目标设备不存在); 已有解绑在进行 -> 1006(状态不允许)。
+ *
+ *   is_sensor 在异步化后已不需要(lora_business 内部按从机表 dev_type 自查),
+ *   保留参数是为了让 sen.unbind / dev.unbind 两个分发表项共用本函数。
+ */
 static int cloud_cmd_unbind(const cloud_req_t *req, cJSON *data, bool is_sensor)
 {
     char uid[CFG_UID_STR_MAX];
@@ -61,7 +64,7 @@ static int cloud_cmd_unbind(const cloud_req_t *req, cJSON *data, bool is_sensor)
     case 0:
         return CLOUD_EC_OK;                 /* 异步发起, 真正删除在收到 ACK 后 */
     case -1:
-        return CLOUD_EC_PARAM;              /* uid 非法(理论上前面已校验� */
+        return CLOUD_EC_PARAM;              /* uid 非法(理论上前面已校验) */
     case -2:
         return CLOUD_EC_NO_DEVICE;          /* 1003: 不在从机表 */
     case -3:
@@ -83,19 +86,21 @@ int cloud_cmd_dev_unbind(const cloud_req_t *req, cJSON *data)
 
 
 /*!
- * \brief 某一行的字段是否被给�没给就��不动��该字段)
- * \note  不能直接�cj_get_str() 的存在��判� �找不到就�out 置空�,
- *        直接调会把没给的字段清成�—��那是静默丢数据�� */
+ * \brief 某一行的字段是否被给了(没给就不动该字段)
+ * \note  不能直接拿 cj_get_str() 的存在性判断(找不到就会把 out 置空),
+ *        直接调会把没给的字段清成空 —— 那是静默丢数据。 */
 static bool cloud_field_given(const char *json, const char *key)
 {
     return (cj_get(json, key, NULL, 0u) != CJ_NOTFOUND);
 }
 
 /*!
- * \brief 取一个字符串字段, 且��超长就报错】��不是截� *
- * \note  �这里有个� 实测踩过 �cloud_json �cj_get_str() 在装不下时是
- *        【截断并返回 true��_host_test/test_cloud.c 的用�[3]), 扢�以直接用它会
- *        �平台�name 写成 40 字节"被静默截�32 字节 —��平台以为设成功了� *        做法: 先取进一个足够大的临时缓� 再按目标缓冲的真实上限判长度� *        tmp �static: 本工程栈只有 4KB; 单线程轮� 不会重入� */
+ * \brief 取一个字符串字段, 且【超长就报错】—— 不是截断
+ * \note  【这里有个坑, 实测踩过】cloud_json 的 cj_get_str() 在装不下时是
+ *        【截断并返回 true】(_host_test/test_cloud.c 的用例 [3]), 所以直接用它会
+ *        把平台的 name 写成 40 字节"被静默截成"32 字节 —— 平台以为设成功了。
+ *        做法: 先取进一个足够大的临时缓冲, 再按目标缓冲的真实上限判长度。
+ *        tmp 是 static: 本工程栈只有 4KB; 单线程轮询, 不会重入。 */
 static bool cloud_take_str_field(const char *json, const char *key,
                                  char *dst, uint16_t dst_cap)
 {
@@ -107,13 +112,13 @@ static bool cloud_take_str_field(const char *json, const char *key,
     }
     if (strlen(tmp) >= (size_t)dst_cap)
     {
-        return false;                       /* 超长(或已被临时缓冲截� -> 让调用方�1001 */
+        return false;                       /* 超长(或已被临时缓冲截断) -> 让调用方回 1001 */
     }
     (void)strcpy(dst, tmp);
     return true;
 }
 
-/** �"level"/"distance" 映射成枚� 非法返回 -1 */
+/** "level"/"distance" 映射成枚举, 非法返回 -1 */
 static int cloud_measure_mode_of(const char *s)
 {
     if (strcmp(s, "level") == 0)    { return (int)CFG_MEASURE_LEVEL; }
@@ -122,11 +127,14 @@ static int cloud_measure_mode_of(const char *s)
 }
 
 /**
- * @brief sen.set / dev.set —��文档 5.3 �9 �/ 5.4 �13 � *   参数: uid(本工程口� + 该域的可写字�给了才改, 没给的不�
+ * @brief sen.set / dev.set —— 文档 5.3 第 9 条 / 5.4 第 13 条
+ *   参数: uid(本工程口径) + 该域的可写字段(给了才改, 没给的不动)
  *   响应: code 0(文档这两条没有 data 字段)
- *   uid 没绑�-> 1003; 值非�越界/超长/枚举不认� -> 1001
+ *   uid 没绑过 -> 1003; 值非法(越界/超长/枚举不认) -> 1001
  *
- * \note 范围校验不在这里重写丢�� 改完交给 config_store_validate() —��它已经覆� *       文档 3.3 / 3.6 的全部取值范�安装高度/校准偏移/周期/低电/超时/音量/闪光�� *       校验不过就当参数错返� 副本丢掉, 配置丢�个字都不动�� */
+ * \note 范围校验不在这里重写一遍: 改完交给 config_store_validate() —— 它已经覆盖了
+ *       文档 3.3 / 3.6 的全部取值范围(安装高度/校准偏移/周期/低电/超时/音量/闪光)。
+ *       校验不过就当参数错返回, 副本丢掉, 配置里一个字都不动。 */
 /* ==================== ★2026-10-05: sen.set -> LoRa 0x01 的默认值 ★ ====================
  * 用户口径: 平台只下发一个字段(上报周期), 另外几个用默认值。
  *   检测间隔 = 10 分钟 = 600 秒      (用户明确指定)
@@ -178,20 +186,21 @@ static int cloud_cmd_set_entry(const cloud_req_t *req, cJSON *data, bool is_sens
 
     if (idx < 0)
     {
-        return CLOUD_EC_NO_DEVICE;          /* 1003: set 只能改已绑定� 不能凭空造一�*/
+        return CLOUD_EC_NO_DEVICE;          /* 1003: set 只能改已绑定的, 不能凭空造一台 */
     }
 
     if (is_sensor)
     {
         cfg_sensor_t *s = &cloud_cfg_staging_buf.sensors[idx];
 
-        /* 【字符串】给了才� 超长要报错��不是悄悄截�平台会以为设成功� */
+        /* 【字符串】给了才改, 超长要报错 —— 不是悄悄截断(平台会以为设成功) */
         if (cloud_field_given(req->data, "name") &&
             !cloud_take_str_field(req->data, "name", s->name, (uint16_t)sizeof(s->name)))
         {
             return CLOUD_EC_PARAM;
         }
-        /* serial 是��只读��字�文档 3.3: 绑定时录�。给了就明确拒绝 —��         * 静默忽略会让平台以为改成功了, 那是更坏的结果��*/
+        /* serial 是【只读】字段(文档 3.3: 绑定时录入)。给了就明确拒绝 ——
+         * 静默忽略会让平台以为改成功了, 那是更坏的结果。 */
         if (cloud_field_given(req->data, "serial"))
         {
             return CLOUD_EC_PARAM;
@@ -210,7 +219,7 @@ static int cloud_cmd_set_entry(const cloud_req_t *req, cJSON *data, bool is_sens
             s->measure_mode = (uint8_t)m;
         }
 
-        /* 【数值��先�uint32 � 再夹回目标宽�—��越界交给 validate() � 不在这里�*/
+        /* 【数值】先取 uint32, 再夹回目标宽度 —— 越界交给 validate(), 不在这里判 */
         if (cloud_field_given(req->data, "installHeightCm"))
         {
             uint32_t v = cj_get_uint(req->data, "installHeightCm", 0u);
@@ -257,7 +266,7 @@ static int cloud_cmd_set_entry(const cloud_req_t *req, cJSON *data, bool is_sens
         {
             return CLOUD_EC_PARAM;
         }
-        /* serial / type 都是【只读��字�文档 3.6): serial 绑定时录� type �dev.bind
+        /* serial / type 都是【只读】字段(文档 3.6): serial 绑定时录入, type 由 dev.bind
          * 的 type 参数决定。给了就明确拒绝, 不静默忽略。 */
         if (cloud_field_given(req->data, "serial") || cloud_field_given(req->data, "type"))
         {
@@ -391,15 +400,24 @@ int cloud_cmd_dev_set(const cloud_req_t *req, cJSON *data)
 
 
 /* ==================================================================
- * sen.query —��文档 5.3 �10 �/ dev.query —��文档 5.4 �15 � * ==================================================================
- * �取本域配�的办法与 rule.query 完全丢�致�� *   复用 config_store_write_members() �9 个域全写出来, 再把本条命令不该带的域删掉�� *   这样 sensors[]/devices[] 的字段名与键序与 cfg.query 里同名对象��同源��
- *   不会因为抄一遍字段表而漂(抄一�= 以后改配置结构要改两� 两处必然不一�� *
- * 【本工程补的运行时字段�� *   文档要求这两条能�朢�近一次上�。该 uid 有上报记录时�
- *       levelCm        朢�近水�cm, = mm/10)   —��只有传感器补
- *       batteryPercent 电量百分�0~100)
- *       lastTs         网关收到该帧时的 Unix � *   �没有上报记录、或网关时钟未同步时, 这几个键【根本不出现�� *     不用 0 冒充: 平台会把 0 读成"水位 0cm / 电量 0% / 时间 1970",
- *     �这个字段没有"更糟, 也和我们别处"不拿默认值冒充真�的做法一致�� *   uid 匹配: 配置里是 hex 串��快照表按键 3 字节, �cfg_uid_to_bytes() �
- *   转不出来就当没匹配上(跳过), 不猜� * ================================================================== */
+ * sen.query —— 文档 5.3 第 10 条 / dev.query —— 文档 5.4 第 15 条
+ * ==================================================================
+ * 【取本域配置的办法与 rule.query 完全一致】
+ *   复用 config_store_write_members() 把 9 个域全写出来, 再把本条命令不该带的域删掉。
+ *   这样 sensors[]/devices[] 的字段名与键序与 cfg.query 里同名对象**同源**,
+ *   不会因为抄一遍字段表而漂(抄一遍 = 以后改配置结构要改两处, 两处必然不一致)。
+ *
+ * 【本工程补的运行时字段】
+ *   文档要求这两条能带"最近一次上报"。该 uid 有上报记录时:
+ *       levelCm        最近水位(cm, = mm/10)   —— 只有传感器补
+ *       batteryPercent 电量百分比(0~100)
+ *       lastTs         网关收到该帧时的 Unix 秒
+ *   没有上报记录、或网关时钟未同步时, 这几个键【根本不出现】:
+ *   不用 0 冒充 —— 平台会把 0 读成"水位 0cm / 电量 0% / 时间 1970",
+ *   这比"这个字段没有"更糟, 也和我们别处"不拿默认值冒充真实值"的做法一致。
+ *   uid 匹配: 配置里是 hex 串, 而快照表按键 3 字节, 用 cfg_uid_to_bytes() 转,
+ *   转不出来就当没匹配上(跳过), 不猜。
+ * ================================================================== */
 static void cloud_inject_last_values(cJSON *arr, bool with_level)
 {
     cJSON *it;
@@ -426,12 +444,14 @@ static void cloud_inject_last_values(cJSON *arr, bool with_level)
         }
         if (!cfg_uid_to_bytes(u->valuestring, uid))
         {
-            continue;                   /* uid 串非� 跳过 */
+            continue;                   /* uid 串非法, 跳过 */
         }
 
         /* ---- online(文档 5.3/5.4: sen.query / dev.query 每一项都要带) ----
-         * 判据与失联检测��完全同丢�套�� 距上次上�< 3 × 该设备上报周�即在线��         * 以前这里没有 online 字段 —��平台只能�有没�lastTs"去猜设备死活�         * 从没上报过的设备也要回一�online=false + 只有配置字段), 不能整项不出�
-         * 平台�列表里没有它"会以为是配置丢了�*/
+         * 判据与失联检测用的是完全同一套: 距上次上报 < 3 × 该设备上报周期即在线。
+         * 以前这里没有 online 字段 —— 平台只能靠"有没有 lastTs"去猜设备死活。
+         * 从没上报过的设备也要回一条(online=false + 只有配置字段), 不能整项不出:
+         * 平台"列表里没有它"会以为是配置丢了。 */
         {
             uint16_t period_s = sensor_offline_period_for_uid(config_store_get(),
                                                               u->valuestring);
@@ -454,7 +474,7 @@ static void cloud_inject_last_values(cJSON *arr, bool with_level)
             (void)cJSON_AddBoolToObject(it, "online", is_on ? 1 : 0);
             if (!have)
             {
-                continue;               /* 从没上报� 只有 online=false + 配置字段 */
+                continue;               /* 从没上报过: 只有 online=false + 配置字段 */
             }
         }
 
@@ -470,7 +490,8 @@ static void cloud_inject_last_values(cJSON *arr, bool with_level)
         {
             (void)cJSON_AddNumberToObject(it, "lastTs", (double)v.rx_unix);
         }
-        /* 加不进去(池满)时只丢这几个运行时字� 不让整条命令失败 —��         * 配置部分是主体且已经写好� cJSON_Add* 失败返回 NULL, 不会破坏对象�*/
+        /* 加不进去(池满)时只丢这几个运行时字段, 不让整条命令失败 ——
+         * 配置部分是主体且已经写好了; cJSON_Add* 失败返回 NULL, 不会破坏对象。 */
     }
 }
 
@@ -528,13 +549,14 @@ int cloud_cmd_dev_query(const cloud_req_t *req, cJSON *data)
 
 
 /* ==================================================================
- * sen.bind / dev.bind(文档 5.3 �7 �/ 5.4 �11 � + 配对后端钩子
+ * sen.bind / dev.bind(文档 5.3 第 7 条 / 5.4 第 11 条) + 配对后端钩子
  * ==================================================================
  * 文档语义:
- *   参数 serial(必填, 8~16 字节) + name(可�� + pairWindowSeconds(可�� 默认 60);
- *   响应 code 0 + data:{"pairWindowSeconds":N} —��只表�窗口已开";
+ *   参数 serial(必填, 8~16 字节) + name(可选) + pairWindowSeconds(可选, 默认 60);
+ *   响应 code 0 + data:{"pairWindowSeconds":N} —— 只表示"窗口已开";
  *   真实绑定结果【异步】经 event.device(bound / bind_failed)上报;
- *   已有 5 个传感器时拒�错误�1009)� * ================================================================== */
+ *   已有 5 个传感器时拒绝(错误码 1009)。
+ * ================================================================== */
 static cloud_pair_open_fn s_pair_fn;
 
 void cloud_proto_set_pair_hook(cloud_pair_open_fn fn)
@@ -576,7 +598,7 @@ static int cloud_cmd_bind(const cloud_req_t *req, cJSON *data, bool is_sensor)
     if (cloud_field_given(req->data, "name") &&
         !cloud_take_str_field(req->data, "name", name, (uint16_t)sizeof(name)))
     {
-        return CLOUD_EC_PARAM;          /* 给了但超�非字符串 -> 报错, 不静默丢 */
+        return CLOUD_EC_PARAM;          /* 给了但超长/非字符串 -> 报错, 不静默丢 */
     }
 
     if (cloud_field_given(req->data, "pairWindowSeconds"))
@@ -592,16 +614,17 @@ static int cloud_cmd_bind(const cloud_req_t *req, cJSON *data, bool is_sensor)
         }
     }
 
-    /* ---- ��11 � dev.bind �type(文档 5.4 �11 � 额外必填) �----
-     * 取��1 声光 / 2 LED / 3 丢��cfg_dev_type_t)。缺了或越界丢��1001 —��     * 【不猜�� 猜错的代价是 devices[].type 写错, 而该字段文档�只读",
-     * 平台自己改不� 只能解绑重绑(现场很折��*/
+    /* ---- 第 11 条: dev.bind 的 type(文档 5.4 第 11 条, 额外必填) ----
+     * 取值 1 声光 / 2 LED / 3 一体机(cfg_dev_type_t)。缺了或越界都回 1001 ——
+     * 【不猜】: 猜错的代价是 devices[].type 写错, 而该字段文档里是"只读",
+     * 平台自己改不了, 只能解绑重绑(现场很折腾)。 */
     if (!is_sensor)
     {
         uint32_t t;
 
         if (cj_get(req->data, "type", NULL, 0u) != CJ_NUM)
         {
-            return CLOUD_EC_PARAM;          /* �type */
+            return CLOUD_EC_PARAM;          /* 缺 type */
         }
         t = cj_get_uint(req->data, "type", 0u);
         if ((t < (uint32_t)CFG_DEVTYPE_SOUND_LIGHT) ||
@@ -612,9 +635,11 @@ static int cloud_cmd_bind(const cloud_req_t *req, cJSON *data, bool is_sensor)
         dev_type = (uint8_t)t;
     }
 
-    /* 容量上限: 用户口径"总数� / 液位� / 声光�", 与运行期 0x04 绑定握手里的
-     * config_store_can_add 同口径��这条是纯配置判� 不需�LoRa —��先在这里拦住,
-     * 别等到配对成功了才发现放不下�     * �注意: 这里只判"还剩不剩位置", 真正绑定�config_store 在收到设�ACK �     *   �lora_business �config_store_bind_device 完成(�0x04 握手路径里再判一��*/
+    /* 容量上限: 用户口径"总数 5 / 液位 5 / 声光 5", 与运行期 0x04 绑定握手里的
+     * config_store_can_add 同口径。这条是纯配置判断, 不需要 LoRa —— 先在这里拦住,
+     * 别等到配对成功了才发现放不下。
+     * 【注意】这里只判"还剩不剩位置", 真正的绑定由 config_store 在收到设备 ACK 后
+     *   经 lora_business 的 config_store_bind_device 完成(即 0x04 握手路径里再判一次)。 */
     if (!config_store_can_add(is_sensor))
     {
         return CLOUD_EC_LIMIT;          /* 1009 */
@@ -622,7 +647,8 @@ static int cloud_cmd_bind(const cloud_req_t *req, cJSON *data, bool is_sensor)
 
     if (s_pair_fn == NULL)
     {
-        /* 配对后端还没�main.c 还没注册): 明确�1006�         * �不做"假装窗口已开" �—��平台会一直等 event.device{bound}, 永远等不到��*/
+        /* 配对后端还没注册(main.c 还没注册): 明确回 1006,
+         * 绝不能做"假装窗口已开" —— 平台会一直等 event.device{bound}, 永远等不到。 */
         log_info("[CLOUD] %s: 本机还没注册配对后端, 回 1006\r\n",
                  is_sensor ? "sen.bind" : "dev.bind");
         return CLOUD_EC_STATE;
@@ -651,23 +677,29 @@ int cloud_cmd_dev_bind(const cloud_req_t *req, cJSON *data)
 }
 
 /**
- * @brief dev.ctrl —��手动控制联动设备(文档 5.4 �14 � 用户 2026-09-30 �6 �
+ * @brief dev.ctrl —— 手动控制联动设备(文档 5.4 第 14 条; 用户 2026-09-30 第 6 条)
  *
- *   参数: uid     必填; 本工程口径是 6 �hex � 也接�"all"(=全部启用的联动设�
- *                   —��文档写的�uint16 �addr, 那是偏差 D-4(用户已确认用 uid),
- *                      扢�以字符串 "all" 就是本工程对文档 "all" 的对应写� *         gear    必填 0~3
- *         ledText 可�� 覆盖档位模板里的 LED 文本(给了就用给的)
- *         ttsText 可�� 同上(语音文本)
+ *   参数: uid     必填; 本工程口径是 26 位 hex 串, 也接受 "all"(=全部启用的联动设备)
+ *                   —— 文档写的是 uint16 addr, 那是偏差 D-4(用户已确认用 uid),
+ *                      所以字符串 "all" 就是本工程对文档 "all" 的对应写法。
+ *         gear    必填 0~3
+ *         ledText 可选: 覆盖档位模板里的 LED 文本(给了就用给的)
+ *         ttsText 可选: 同上(语音文本)
  *   响应: code 0 + data.results[{uid,code}]
- *   语义: 执行后进�manual 模式(�rules.mode=manual); manualTimeoutSeconds 到期
- *         由主循环自动回归 auto; manual 期间阈��变化��不再自动联动�� *         (抑制点在 level_supervisor.c: �cfg->rules.mode)� *
- * 【与文档的一处有意差� 应答时机� *   文档�网关�LoRa ACK(超时 5 �后应� 个别设备失败�results 中体�� *   本工程是【非阻塞】架� 命令处理不能把主循环�5 秒等空口 —��扢��
- *     · results[].code 反映【受�投����结�
- *         0    = 已投递到下发缓存(空口发��与重试�lora_business �poll 负责)
- *         1003 = 目标设备不存�不在从机表里 / 已停�
+ *   语义: 执行后进入 manual 模式(改 rules.mode=manual); manualTimeoutSeconds 到期
+ *         由主循环自动回归 auto; manual 期间阈值变化也不再自动联动
+ *         (抑制点在 level_supervisor.c: 看 cfg->rules.mode)。
+ *
+ * 【与文档的一处有意差异: 应答时机】
+ *   文档要求网关等 LoRa ACK(超时 5 秒)后应答, 个别设备失败在 results 中体现。
+ *   本工程是【非阻塞】架构: 命令处理不能把主循环卡 5 秒等空口 —— 所以:
+ *     · results[].code 反映【受理投递】的结果:
+ *         0    = 已投递到下发缓存(空口发送与重试由 lora_business 的 poll 负责)
+ *         1003 = 目标设备不存在(不在从机表里 / 已停用)
  *         1007 = 网关内部错误(uid 非法 / 组帧失败)
- *     · 真正的空口执行结�ACK / 5s 超时 / 重试耗尽)�event.action 异步补报
- *       —��这也正是文档 5.4 末要求的那条("后台重试并经 event.action 补报结果")� */
+ *     · 真正的空口执行结果(ACK / 5s 超时 / 重试耗尽)由 event.action 异步补报
+ *       —— 这也正是文档 5.4 末要求的那条("后台重试并经 event.action 补报结果")。
+ */
 /* ★2026-10-10: dev.ctrl 的 ledTextShowMode / ledColor 是【逗号串】(与 gears[] 一致)。
  * 这里放两个纯解析小助手, 严格但简单: 格式不对就返回 false -> 调用方回 1001。
  * ⚠️ 不宽容: "1, 2"(带空格)、"1,2,3"、单个值 都判非法 —— 宁可让平台立刻发现写错了,
@@ -741,14 +773,14 @@ int cloud_cmd_dev_ctrl(const cloud_req_t *req, cJSON *data)
 
     if ((req->data == NULL) || (cfg == NULL)) { return CLOUD_EC_PARAM; }
 
-    /* ---- 目标: "all" 或具�uid ---- */
+    /* ---- 目标: "all" 或具体 uid ---- */
     if (!cj_get_str(req->data, "uid", uid, (uint16_t)sizeof(uid)))
     {
         return CLOUD_EC_PARAM;
     }
     if (strcmp(uid, "all") == 0)
     {
-        only_uid = NULL;                     /* NULL = 全部启用的联动设�*/
+        only_uid = NULL;                     /* NULL = 全部启用的联动设备 */
     }
     else
     {
@@ -961,7 +993,7 @@ int cloud_cmd_dev_ctrl(const cloud_req_t *req, cJSON *data)
     if (sent < 0) { return CLOUD_EC_PARAM; }
     if (total == 0u)
     {
-        /* 丢�台都没��中: 指定的那台不存在/已停� 或压根没有启用的联动设备 */
+        /* 一台都没选中: 指定的那台不存在/已停用, 或压根没有启用的联动设备 */
         return CLOUD_EC_NO_DEVICE;           /* 1003 */
     }
 
@@ -972,8 +1004,8 @@ int cloud_cmd_dev_ctrl(const cloud_req_t *req, cJSON *data)
         int rc = cloud_commit_config(&cloud_cfg_staging_buf);
         if (rc != CLOUD_EC_OK)
         {
-            /* 配置没落�= manual 没生� 但动作已经投递出去了。如实报�
-             * 平台重发丢�次即�幂等: 同样的档�文本, 下发判据不会重复投���*/
+            /* 配置没落盘 = manual 没生效, 但动作已经投递出去了。如实报错;
+             * 平台重发一次即可(幂等: 同样的档位/文本, 下发判据不会重复投递)。 */
             log_info("[CTRL] !! dev.ctrl 动作已投� �manual 模式落盘失败(rc=%d)\r\n", rc);
             return rc;
         }
