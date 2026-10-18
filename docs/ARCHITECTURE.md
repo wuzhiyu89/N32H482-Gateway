@@ -251,7 +251,7 @@ powershell -ExecutionPolicy Bypass -File tools\verify.ps1
       - 开关与节拍常量 → `app_config.h`
 - [x] `g4_at.c`：`g4_at_poll()` **1384 → 221 行**，25 个状态各拆成 `g4_st_*()`，
       状态迁移仍统一走 `g4_goto_state()`；`test_state` 35/35 通过
-- [x] `cloud_proto.c` 拆分（进行中）：上行构造 → `cloud_uplink.c`；ota 三条 → `cloud_cmd_ota.c`；其余命令继续按域拆
+- [x] `cloud_proto.c` 拆分（进行中）：上行构造 → `cloud_uplink.c`；`sys` → `cloud_cmd_sys.c`；`ota` → `cloud_cmd_ota.c`；`cfg`/`sen`/`dev`/`rule` 待拆（用"锚点+大括号配对"提取，不能按行号——坏注释已把多行压成一行）
 - [ ] `lora_business.c` 拆分：从机表 / 绑定 / 解绑 / 声光 / 字段 / 下行
 - [ ] 切断 `cloud ↔ lora_business` 双向依赖
 - [ ] 两套 JSON（`cloud_json` + `cJSON`）的边界写清楚，能合则合
