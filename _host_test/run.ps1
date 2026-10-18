@@ -99,7 +99,7 @@ try {
             name = 'test_cloud'
             exe  = '_host_test\test_cloud.exe'
             src  = @(
-                'app/cloud/cloud_json.c', 'app/cloud/cloud_proto.c', 'app/cloud/cloud_uplink.c', 'app/cloud/cloud_cmd_ota.c', 'app/cloud/cloud_cmd_sys.c', 'app/cloud/cloud_cmd_cfg.c',
+                'app/cloud/cloud_json.c', 'app/cloud/cloud_proto.c', 'app/cloud/cloud_uplink.c', 'app/cloud/cloud_cmd_ota.c', 'app/cloud/cloud_cmd_sys.c', 'app/cloud/cloud_cmd_cfg.c', 'app/cloud/cloud_cmd_rule.c',
                 'app/model/cloud_profile.c', 'app/model/config_store.c',
                 'app/common/utils.c',       # CRC32 等工具已搬到 app/common/utils.c
                 'app/service/sensor_offline.c', 'app/model/last_value.c',
