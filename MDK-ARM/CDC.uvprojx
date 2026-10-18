@@ -690,6 +690,11 @@
                       <FilePath>..\app\links\lora\lora_business.c</FilePath>
                     </File>
                     <File>
+                      <FileName>lora_slave.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\links\lora\lora_slave.c</FilePath>
+                    </File>
+                    <File>
                       <FileName>lora_internal.h</FileName>
                       <FileType>5</FileType>
                       <FilePath>..\app\links\lora\lora_internal.h</FilePath>
@@ -1751,6 +1756,11 @@
                       <FileName>lora_business.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\links\lora\lora_business.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>lora_slave.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\links\lora\lora_slave.c</FilePath>
                     </File>
                     <File>
                       <FileName>lora_internal.h</FileName>

@@ -17,6 +17,33 @@ extern "C" {
 /** 本网关的 13 字节地址（lora_business_init 时从 param_save 读出） */
 extern uint8_t g_gw_uid[LORA_UID_BYTES];
 
+/* ==================== 从机表（lora_slave.c） ====================
+ * 表是动态的：init 时从 config_store 装载，运行期由绑定/解绑增删。
+ * 除只读遍历（get_slave_list）外，请不要直接改 g_slave_list / g_slave_count。 */
+extern lora_slave_t g_slave_list[];
+extern uint8_t      g_slave_count;
+
+/** 按 13 字节地址查索引；0xFF = 不在表里 */
+uint8_t lora_slave_find(const uint8_t uid[LORA_UID_BYTES]);
+
+/** 收到帧时"摸一下"：标记在线 + 记 last_recv_tick；0xFF = 不在表里 */
+uint8_t lora_slave_touch(const uint8_t uid[LORA_UID_BYTES]);
+
+/** 往表尾追加一台；返回索引，-1 = 表满/已在表里 */
+int lora_slave_add(const uint8_t uid[LORA_UID_BYTES], slave_type_t type);
+
+/** 删除指定地址（末尾元素前移补洞）；0 = 成功，-1 = 不在表里 */
+int lora_slave_del(const uint8_t uid[LORA_UID_BYTES]);
+
+/** 从 config_store 重新装载整张表（init 时调一次） */
+void lora_slave_load(void);
+
+/** 设备地址首位 -> 类型（1 网关 / 2 液位 / 3 声光），现场规则 */
+uint8_t lora_dev_type_of_uid(const uint8_t uid[LORA_UID_BYTES]);
+
+/** ASCII hex 文本 -> 二进制（旧格式下行的兼容分支用）；-1 = 非法 */
+int lora_hex_str2bin(const char *hex, int hex_len, uint8_t *out, int out_max);
+
 /** 0x08 出厂字段应答（on_frame 里 0x08 分支调用） */
 void lora_field_handle_resp(const lora_frame_t *frame, uint8_t idx);
 
