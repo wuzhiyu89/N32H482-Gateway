@@ -1006,7 +1006,7 @@ int cloud_cmd_dev_ctrl(const cloud_req_t *req, cJSON *data)
         {
             /* 配置没落盘 = manual 没生效, 但动作已经投递出去了。如实报错;
              * 平台重发一次即可(幂等: 同样的档位/文本, 下发判据不会重复投递)。 */
-            log_info("[CTRL] !! dev.ctrl 动作已投� �manual 模式落盘失败(rc=%d)\r\n", rc);
+            log_info("[CTRL] !! dev.ctrl 动作已投递, 但 manual 模式落盘失败(rc=%d)\r\n", rc);
             return rc;
         }
     }
@@ -1035,7 +1035,7 @@ int cloud_cmd_dev_ctrl(const cloud_req_t *req, cJSON *data)
         return CLOUD_EC_INTERNAL;
     }
 
-    log_info("[CTRL] dev.ctrl: uid=%s gear=%u -> 受理 %d/%u � 已进 manual 模式\r\n",
+    log_info("[CTRL] dev.ctrl: uid=%s gear=%u -> 受理 %d/%u, 已进 manual 模式\r\n",
              (only_uid != NULL) ? only_uid : "all", (unsigned)gear, sent, (unsigned)total);
     return CLOUD_EC_OK;
 }
