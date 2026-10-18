@@ -105,7 +105,7 @@
 | | `ota_health.c` | A/B 槽的机会计数与回滚判定 | 不执行搬运 |
 | | `md5.c` | 增量 MD5 | — |
 | `src/main.c` | | **只做模式分发**（30 行） | 不再放业务逻辑 |
-| `app/core` | `app_boot` / `app_loop` / `app_state` / `app_console` / `app_downlink` / `app_uplink` / `app_modes` | 编排层：启动序列、主循环、共享状态、日志口、下行路由、上行业务、工程模式 | 不含协议/驱动细节 |
+| `app/core` | `app_boot` / `app_loop` / `app_state` / `app_console` / `app_downlink` / `app_uplink` / `app_level` / `app_modes` | 编排层：启动序列、主循环、共享状态、日志口、下行路由、上行业务、工程模式 | 不含协议/驱动细节 |
 | `app/core/app_config.h` | | 编译期开关与少量编译期参数的**唯一默认值源** | 不放可调参数（进 config_store） |
 
 ---
