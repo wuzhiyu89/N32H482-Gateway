@@ -90,6 +90,13 @@ void lora_bind_logic(void);
 /** 上报一次绑定/解绑事件（绑定与解绑共用这个出口） */
 void lora_bind_fire_event(const char *uid_hex, bool is_sensor, lora_bind_event_t event);
 
+/* ==================== 解绑 0x05（lora_unbind.c） ====================
+ * 两阶段状态机；0x05 不进 data_cache，解绑期间目标从机被当作"锁"。 */
+/** 这条 ack 是否属于正在进行的解绑（是则交给 lora_unbind_on_ack） */
+bool lora_unbind_owns_ack(uint8_t slave_idx);
+void lora_unbind_on_ack(void);
+void lora_unbind_logic(void);
+
 /** 0x08 出厂字段应答（on_frame 里 0x08 分支调用） */
 void lora_field_handle_resp(const lora_frame_t *frame, uint8_t idx);
 

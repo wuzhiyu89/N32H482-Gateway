@@ -690,6 +690,11 @@
                       <FilePath>..\app\links\lora\lora_business.c</FilePath>
                     </File>
                     <File>
+                      <FileName>lora_unbind.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\links\lora\lora_unbind.c</FilePath>
+                    </File>
+                    <File>
                       <FileName>lora_bind.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\links\lora\lora_bind.c</FilePath>
@@ -1771,6 +1776,11 @@
                       <FileName>lora_business.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\links\lora\lora_business.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>lora_unbind.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\links\lora\lora_unbind.c</FilePath>
                     </File>
                     <File>
                       <FileName>lora_bind.c</FileName>
