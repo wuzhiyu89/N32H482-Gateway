@@ -3657,6 +3657,1445 @@ static bool g4_con_broker_cmd(const char *args, bool tls_cmd)
  *   · 下行: 收全的 publish 进队列, 由 g4_urc_poll() 在主循环里投给业务层。
  * 于是"阻塞窗口把接收灌爆"和"多个消费者抢字节流"这两类问题从结构上消失。
  */
+/* ==================================================================
+ * 主状态机的各状态处理函数
+ * ------------------------------------------------------------------
+ * 2026-10-18: 从 g4_at_poll() 的 1384 行 switch 里整段搬出来。
+ * 每个 case 的函数体用一个 do{...}while(0) 原样包住 —— 这样原 case 里
+ * 的 break(无论是结束本状态还是 if 里的提前退出)语义完全不变。
+ * 状态迁移仍然统一走 g4_goto_state()。
+ * ================================================================== */
+
+/* ---- G4_STATE_RESET ---- */
+static void g4_st_reset(uint32_t now)
+{
+    (void)now;
+    do
+    {
+            /* 假死/反复连不上时的最后手段: 拔电重来 */
+            log_info("[G4] power reset (PA8=%s, %s)...\r\n",
+                     g4_pwr_level_text(), g4_pwr_polarity_text());
+            G4_ModulePWR_GPIO_Init();
+            g4_pwr_cycle_and_listen("断电复位");
+            g4_info_clear();
+            g_pdp_retry    = 0u;
+            g_dialup_tried = false;
+            g4_goto_state(G4_STATE_WAIT_MODULE);
+            break;
+    } while (0);
+}
+
+/* ---- G4_STATE_WAIT_MODULE ---- */
+static void g4_st_wait_module(uint32_t now)
+{
+    do
+    {
+        {
+            /* 【短听 + 主动出击】
+             * 为什么不自己读缓冲: 收包泵已经在后台统计 +MATREADY/RDY 了。这里只查计数,
+             * 好处是泵照常把每一行喂给 URC 层 —— 老版本"WAIT_MODULE 期间不敢扫 URC"
+             * 的限制没有了。
+             * 为什么不等满 30s 自己发 AT: 现场实测这块模组(ML307Y)不会稳定地自己吐
+             * +MATREADY —— 30s 里一个字都没有, 可一发 AT 它就把 +MATREADY 和 OK 一起
+             * 回了。所以只安静听一小会儿捡 banner, 到点就主动敲。 */
+            if (g4_io_ready_total() != g_ready_base)
+            {
+                log_info("[G4] module ready (+MATREADY), 等了 %lus —— 立刻开始握手\r\n",
+                         (unsigned long)((now - g_state_tick) / 1000u));
+                g4_goto_state(G4_STATE_AT_SYNC);
+                break;
+            }
+
+            /* 只要听到过任何字节(哪怕是一行乱码), 就说明供电/接线至少有一项是对的,
+             * 把当前极性记死, 以后不再翻 —— 否则会把一个已经能通的模组反复断电。 */
+            if ((!g_pwr_ok) && (g4_io_rx_total() > 0u))
+            {
+                g_pwr_ok = true;
+                log_info("[G4] == 模组开口说话了 -> 确认供电极性: %s (PA8=%s) ==\r\n",
+                         g4_pwr_polarity_text(), g4_pwr_level_text());
+            }
+
+    #if G4_PWR_SEARCH
+            /* 一个字都没听到, 且还没试过相反极性 -> 头号嫌疑: PA8 极性猜反了 */
+            if ((!g_pwr_ok) && (g_pwr_flips < G4_PWR_SEARCH_MAX) &&
+                ((now - g_state_tick) > G4_PWR_SEARCH_MS))
+            {
+                g_pwr_flips++;
+                G4_PowerSwitch_SwapOnHigh();
+                log_info("[G4] !! %us 内一个字节都没听到 -> 怀疑供电极性反了, 翻成 %s 再试\r\n",
+                         (unsigned)(G4_PWR_SEARCH_MS / 1000u), g4_pwr_polarity_text());
+                g4_pwr_cycle_and_listen("极性翻转");
+                break;
+            }
+    #endif
+
+            /* 安静听的时间到 -> 主动出击(不再无限等) */
+            if ((now - g_state_tick) > g_boot_wait_ms)
+            {
+                log_info("[G4] 静听 %us 结束(累计收到 %lu 字节) -> 开始主动敲 AT\r\n",
+                         (unsigned)(g_boot_wait_ms / 1000u),
+                         (unsigned long)g4_io_rx_total());
+                g4_goto_state(G4_STATE_AT_SYNC);
+            }
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_AT_SYNC ---- */
+static void g4_st_at_sync(uint32_t now)
+{
+    do
+    {
+        {
+            /* 【主动出击的锤子】每隔 G4_AT_PROBE_MS(500ms) 敲一次 "AT"。
+             * 单次超时就是 G4_AT_PROBE_MS, 所以敲的节奏稳定, 不会被长超时拖成 1Hz;
+             * 每 10 次打一行进度 + 【累计收到】字节数。 */
+            g4_cmd_res_t r = g4_io_cmd_run("AT", "OK", G4_AT_PROBE_MS);
+            if (r == G4_CMD_RUNNING)
+            {
+                break;
+            }
+
+            if (r == G4_CMD_OK)
+            {
+                log_info("AT_SYNC: OK (第 %u 次敲, 从开始敲到应答 %lus)\r\n",
+                         (unsigned)(g_retry_cnt + 1u),
+                         (unsigned long)((now - g_state_tick) / 1000u));
+                g4_goto_state(G4_STATE_ATE0);
+                break;
+            }
+
+            g_retry_cnt++;
+
+            if ((g_retry_cnt % 10u) == 0u)
+            {
+                log_info("[G4] 主动敲 AT %u/%u 次, 累计收到 %lu 字节(PA8=%s)\r\n",
+                         (unsigned)g_retry_cnt, (unsigned)G4_AT_SYNC_RETRY_MAX,
+                         (unsigned long)g4_io_rx_total(), g4_pwr_level_text());
+            }
+
+            if (g_retry_cnt > G4_AT_SYNC_RETRY_MAX)
+            {
+                /* 敲了这么久还不回 —— 按【累计收到】分两种完全不同的故障:
+                 *   累计=0 -> 模组一个字节都没发过: 供电/TX-RX 接反/波特率/没起来
+                 *   累计>0 -> 它会说话, 是内容或波特率对不上(看上面的 [G4_RX]) */
+                log_info("[G4] !! 敲了 %u 次 AT(%us) 都不回, 累计收到=%lu 字节, PA8=%s\r\n",
+                         (unsigned)(g_retry_cnt - 1u),
+                         (unsigned)(((g_retry_cnt - 1u) * G4_AT_PROBE_MS) / 1000u),
+                         (unsigned long)g4_io_rx_total(), g4_pwr_level_text());
+                if (g4_io_rx_total() == 0u)
+                {
+                    log_info("[G4] !! 模组一个字节都没发过 -> 查供电(3.4~4.2V 且不跳)/"
+                             "VCC 处 470uF+10uF+100nF / PC8-PC9 是否接反 / TX 空闲电平\r\n");
+                }
+                else
+                {
+                    log_info("[G4] !! 它会说话但听不懂 -> 优先查波特率, 再对比上面的 [G4_RX] 原始行\r\n");
+                }
+                /* 模组已经不理人了: 继续敲 AT 是白费, 直接 4G_RST 断电重启它 */
+                g4_link_recover("模组长时间不应答 AT");
+            }
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_ATE0 ---- */
+static void g4_st_ate0(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* 子步骤: ATE0 -> ATI -> CGMR -> CFUN? (-> CFUN=1), 每条都是一个非阻塞命令 */
+            g4_cmd_res_t r;
+
+            switch (g_step)
+            {
+            case 0u:
+                /* 关回显只是"锦上添花": 成不成功都往下走, 不在这里耗重试机会。
+                 * (ml307_app.c 里写的是 ATE1=开回显 —— 那是给"靠回显做同步"的解析器用的;
+                 *  我们按关键字匹配应答, 回显只会把日志刷满, 所以用 ATE0。) */
+                r = g4_io_cmd_run("ATE0", "OK", AT_CMD_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+                if (r != G4_CMD_OK)
+                {
+                    log_info("[G4] ATE0 no OK(continue)\r\n");
+                }
+                g_step = 1u;
+                break;
+
+            case 1u:
+                r = g4_io_cmd_run("ATI", "OK", AT_CMD_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+                if ((r == G4_CMD_OK) && (g4_io_cmd_resp()[0] != '\0'))
+                {
+                    log_info("[G4] 模组 ATI: %s\r\n", g4_io_cmd_resp());
+                }
+                g_step = 2u;
+                break;
+
+            case 2u:
+                r = g4_io_cmd_run("AT+CGMR", "OK", AT_CMD_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+                if ((r == G4_CMD_OK) && (g4_io_cmd_resp()[0] != '\0'))
+                {
+                    log_info("[G4] 固件版本 AT+CGMR: %s\r\n", g4_io_cmd_resp());
+                }
+                g_step = 3u;
+                break;
+
+            case 3u:
+                /* ------------------------------------------------------------------
+                 * 【CFUN: 模组的射频功能档位 —— 排"能读卡、能应答、就是不上网"必查】
+                 *
+                 * 现场现象: AT+CPIN? 回 READY(卡读得到)、ATI/CGSN/CIMI/ICCID 全正常,
+                 * 但 AT+CSQ 回 99,99(无信号) 且 AT+CEREG? 回 0,0
+                 * —— 注意 0,0 是"没注册【也没有在搜网】", 跟"在搜但搜不到(0,2)"
+                 *    完全不同。这个组合除了"没信号/供电塌"之外, 还有一个非常容易被
+                 *    忽略的原因: 模组被留在 AT+CFUN=0(最小功能, 射频关着), 这时它
+                 *    【根本不会去搜网】, 于是永远 CSQ=99 / CEREG=0,0。
+                 *
+                 * 谁会把它留在 0: 上一轮实验敲过 AT+CFUN=0、异常掉电、或者模组自己
+                 * 因为欠压保护进了最小功能。CFUN 在有些固件里是【掉电保持】的,
+                 * 所以"之前能连、现在不能"也可能只是这一档。
+                 *
+                 * 处理: 读一次 AT+CFUN?, 把值打进日志; 是 0 就发 AT+CFUN=1 打开射频。
+                 * 注意用 AT+CFUN=1(不带第二个参数) —— 那是"设为全功能, 不复位";
+                 * AT+CFUN=1,1 会复位模组, 这里不要用。
+                 * ------------------------------------------------------------------ */
+                r = g4_io_cmd_run("AT+CFUN?", "+CFUN:", AT_CMD_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+
+                if (r == G4_CMD_OK)
+                {
+                    int     v[2];
+                    uint8_t nv = at_parse_ints(g4_io_cmd_resp(), v, 2u);
+
+                    g_cfun = (nv > 0u) ? (int8_t)v[0] : -1;
+
+                    if (g_cfun == 0)
+                    {
+                        log_info("[G4] !! CFUN=0 —— 模组处于【最小功能/射频关闭】, 它不会去搜网!\r\n");
+                        log_info("[G4] !! 这正好能解释 CSQ=99 + CEREG 0,0(没注册也没在搜); "
+                                 "下面发 AT+CFUN=1 把射频打开\r\n");
+                        g_cfun_need_on = true;
+                    }
+                    else
+                    {
+                        log_info("[G4] CFUN=%d (射频正常开启, 1=全功能)\r\n", (int)g_cfun);
+                    }
+                }
+                else
+                {
+                    log_info("[G4] CFUN 读不到(模组不支持或没应答, continue); "
+                             "若一直连不上, 手工敲: #at AT+CFUN?\r\n");
+                    g_cfun = -1;
+                }
+                g_step = 4u;
+                break;
+
+            case 4u:
+                if (!g_cfun_need_on)
+                {
+                    g4_goto_state(G4_STATE_MLPMCFG);
+                    break;
+                }
+                r = g4_io_cmd_run("AT+CFUN=1", "OK", 5000u);
+                if (r == G4_CMD_RUNNING) { break; }
+
+                if (r == G4_CMD_OK)
+                {
+                    log_info("[G4] 已切到 CFUN=1(全功能, 射频开) —— 稍后看 CSQ/CEREG 有没有起来\r\n");
+                    g_cfun = 1;
+                }
+                else
+                {
+                    log_info("[G4] !! AT+CFUN=1 没回 OK —— 手工敲 #at AT+CFUN=1 再看\r\n");
+                }
+                g_cfun_need_on = false;
+                g4_goto_state(G4_STATE_MLPMCFG);
+                break;
+
+            default:
+                g4_goto_state(G4_STATE_MLPMCFG);
+                break;
+            }
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_MLPMCFG ---- */
+static void g4_st_mlpmcfg(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* 关掉模组默认打开的深睡眠(ml307_app.c: AT+MLPMCFG="sleepmode",0,1)。
+             * 深睡眠下模组会周期性不应答 AT, 表现就是"时不时收不到云端下行"。
+             * 失败不影响联网, 继续往下。 */
+            g4_cmd_res_t r = g4_io_cmd_run("AT+MLPMCFG=\"sleepmode\",0,1", "OK",
+                                           AT_CMD_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+            if (r != G4_CMD_OK)
+            {
+                log_info("[G4] MLPMCFG no OK(continue)\r\n");
+            }
+            g4_goto_state(G4_STATE_CPIN);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_CPIN ---- */
+static void g4_st_cpin(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* SIM 是否就绪只查一次; 不 READY 也照常往下试 —— 后面注册超时会走恢复流程 */
+            g4_cmd_res_t r = g4_io_cmd_run("AT+CPIN?", "+CPIN:", AT_CMD_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+
+            if (r == G4_CMD_OK)
+            {
+                const char *resp = g4_io_cmd_resp();
+
+                if (strstr(resp, "READY") != NULL)
+                {
+                    log_info("[G4] SIM ready\r\n");
+                }
+                else
+                {
+                    /* 没插卡/需要 PIN 时注册必然失败, 但还是走完整条流程看日志 */
+                    log_info("[G4] SIM not READY: %s\r\n", resp);
+                }
+            }
+            else
+            {
+                log_info("[G4] CPIN no resp(continue)\r\n");
+            }
+            g4_goto_state(G4_STATE_CGSN);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_CGSN ---- */
+static void g4_st_cgsn(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* AT+CGSN=1 读 IMEI: 应答 "+CGSN: <imei>" */
+            g4_cmd_res_t r = g4_io_cmd_run("AT+CGSN=1", "+CGSN:", AT_CMD_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+
+            if ((r == G4_CMD_OK) &&
+                (at_take_digits(g4_io_cmd_resp(), g_info.imei, G4_IMEI_LEN) >= 14u))
+            {
+                log_info("[G4] IMEI=%s\r\n", g_info.imei);
+            }
+            else
+            {
+                g_info.imei[0] = '\0';
+                /* ★2026-10-08: clientID 已不再默认用 IMEI(现在固定 "110001")★,
+                 * 所以这里只说"IMEI 读不到"(它仍然影响: 诊断日志、以及 clientId 配成
+                 * 特殊值 "IMEI" 时的取值)。 */
+                log_info("[G4] IMEI 读不到(不影响 clientID=%s)\r\n", g_client_id);
+            }
+            g4_goto_state(G4_STATE_CIMI);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_CIMI ---- */
+static void g4_st_cimi(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* AT+CIMI 的应答【就是 IMSI 本身】: 一行 15 位数字 —— 关键字只能用来
+             * 判定"收完了", 所以用 "OK", 真正的 IMSI 从累积应答里取第一段数字。 */
+            g4_cmd_res_t r = g4_io_cmd_run("AT+CIMI", "OK", AT_CMD_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+
+            if ((r == G4_CMD_OK) &&
+                (at_take_digits(g4_io_cmd_resp(), g_info.imsi, G4_IMSI_LEN) >= 14u))
+            {
+                log_info("[G4] IMSI=%s\r\n", g_info.imsi);
+            }
+            else
+            {
+                g_info.imsi[0] = '\0';
+                log_info("[G4] IMSI none\r\n");
+            }
+            g4_goto_state(G4_STATE_ICCID);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_ICCID ---- */
+static void g4_st_iccid(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* ML307R 是 AT*ICCID?, 个别固件是 AT+ICCID?, 两个都试一次, 都不行就算了 */
+            g4_cmd_res_t r;
+
+            if (g_step == 0u)
+            {
+                r = g4_io_cmd_run("AT*ICCID?", "ICCID", AT_CMD_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+
+                if ((r == G4_CMD_OK) &&
+                    (at_take_digits(g4_io_cmd_resp(), g_info.iccid, G4_ICCID_LEN) >= 18u))
+                {
+                    log_info("[G4] ICCID=%s\r\n", g_info.iccid);
+                    g4_goto_state(G4_STATE_CSQ);
+                    break;
+                }
+                g_step = 1u;            /* 换第二条命令再试 */
+                break;
+            }
+
+            r = g4_io_cmd_run("AT+ICCID?", "ICCID", AT_CMD_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+
+            if ((r == G4_CMD_OK) &&
+                (at_take_digits(g4_io_cmd_resp(), g_info.iccid, G4_ICCID_LEN) >= 18u))
+            {
+                log_info("[G4] ICCID=%s\r\n", g_info.iccid);
+            }
+            else
+            {
+                g_info.iccid[0] = '\0';
+                log_info("[G4] ICCID none\r\n");
+            }
+            g4_goto_state(G4_STATE_CSQ);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_CSQ ---- */
+static void g4_st_csq(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* AT+CSQ → "+CSQ: <rssi>,<ber>"; rssi 99 = 无信号/未知 */
+            g4_cmd_res_t r = g4_io_cmd_run("AT+CSQ", "+CSQ:", AT_CMD_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+
+            if (r == G4_CMD_OK)
+            {
+                char num[8];
+
+                if (at_take_digits(g4_io_cmd_resp(), num, (uint8_t)sizeof(num)) > 0u)
+                {
+                    uint8_t csq = (uint8_t)atoi(num);
+
+                    if ((csq > 31u) || (csq == 99u))
+                    {
+                        g_info.csq      = 99u;
+                        g_info.rssi_dbm = 0;
+                        log_info("[G4] CSQ=99 (no signal)\r\n");
+                    }
+                    else
+                    {
+                        g_info.csq      = csq;
+                        g_info.rssi_dbm = (int16_t)(-113 + 2 * (int)csq);
+                        log_info("[G4] CSQ=%u (%d dBm)\r\n",
+                                 (unsigned)g_info.csq, (int)g_info.rssi_dbm);
+                    }
+                }
+            }
+            else
+            {
+                log_info("[G4] CSQ none\r\n");
+            }
+
+            /* AT+QENG="servingcell" 读 RSRP —— CSQ=99 不可靠(99 既可能真无信号,
+             * 也可能模组还没测到/射频被 AT+CFUN=0 关着), RSRP 是 LTE 参考信号接收功率,
+             * 比 CSQ 更能定位"到底是没信号还是模组没在测"。命令不支持/没注册也没关系,
+             * 只打日志不拦建链(同 CSQ 做法)。响应格式因模组而异, 原样打进日志,
+             * 现场 RSRP/RSRQ/RSSI 数值直接看原文(通常在 LTE 模式响应的倒数第 3~4 字段)。 */
+            {
+                char qeng[160];
+                if (g4_io_send_expect_resp("AT+QENG=\"servingcell\"", "+QENG:",
+                                           AT_CMD_TIMEOUT_MS, NULL,
+                                           qeng, (uint16_t)sizeof(qeng)))
+                {
+                    log_info("[G4] QENG servingcell: %s\r\n", qeng);
+                }
+                else
+                {
+                    log_info("[G4] QENG servingcell none (未注册或模组不支持)\r\n");
+                }
+            }
+
+            /* 顺手读一次模组自测供电(AT+MCHIPINFO="vbat", 兜底 AT+CBC)和模组温度:
+             * 现场"供电稳不稳、模组是不是过热重启"看这两行就够。命令不支持也没关系,
+             * g4_read_vbat()/g4_read_temp() 自己会打日志然后返回, 不影响建链。
+             * (这两个是阻塞封装, 但内部跑的是同一个收包泵, 所以不会丢接收。) */
+            (void)g4_read_vbat();
+            g4_read_temp();
+
+            /* 【回到"等注册"这条主路 —— 拨号(MDIALUP)被证明是帮倒忙, 已撤下】
+             * 现场日志的铁证: 执行 AT+MDIALUP=1,1 之后, 模组的 AT 引擎就乱了 ——
+             * 之后每条命令只回 "+MATREADY" + "OK", 连 +CEREG: 都不给。
+             * 现场那份成功率很高的 ml307_app.c 从头到尾没调过 MDIALUP, 走的就是
+             * 标准 3GPP: CREG 等注册 → CGDCONT → CGACT → CGPADDR。 */
+            g4_goto_state(G4_STATE_CREG);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_CREG ---- */
+static void g4_st_creg(uint32_t now)
+{
+    do
+    {
+        {
+            const char  *cmd;
+            const char  *tag;
+            uint8_t      stat = 0xFFu;
+            g4_cmd_res_t r;
+
+            /* ---- 注册被拒(stat==3)之后的恢复: 发 CFUN 软复位 -> 等 10s -> 回 AT_SYNC ----
+             * 【为什么不用 delay_ms(10000)】: 那 10 秒里没人收 USART2, 云端下行会把
+             * 环形缓冲顶爆 —— 正是"一下发就出事"的成因之一。现在只是"这一拍什么都不做"。 */
+            if (g_step >= 2u)
+            {
+                if (g_step == 2u)
+                {
+                    r = g4_io_cmd_run("AT+CFUN=1,1", "OK", 8000u);
+                    if (r == G4_CMD_RUNNING) { break; }
+                    g_step      = 3u;
+                    g_wait_tick = now;
+                    break;
+                }
+                if ((uint32_t)(now - g_wait_tick) >= 10000u)
+                {
+                    g4_goto_state(G4_STATE_AT_SYNC);
+                }
+                break;
+            }
+
+            /* 【限速】没到下一次查询时间就什么都不发(进入本状态时 g_retry_cnt=0,
+             * 所以第一条注册查询立刻发; 之后每 AT_CEREG_POLL_MS 一条)。
+             * ⚠️ 只有 g_step==0(没有在途命令)时才允许被限速挡住, 否则会把自己
+             *    在途的那条命令也一起"限"住, 永远收不到应答。 */
+            if ((g_step == 0u) && (g_retry_cnt != 0u) &&
+                ((now - g_state_tick) < AT_CEREG_POLL_MS))
+            {
+                break;
+            }
+
+            if (g_step == 0u)
+            {
+                g_state_tick = now;     /* 记住这次查询时刻, 管住下一次 */
+                g_retry_cnt++;
+                g_step = 1u;
+            }
+
+            cmd = reg_query_cmd(g_reg_probe);
+            tag = reg_query_tag(g_reg_probe);
+
+            r = g4_io_cmd_run(cmd, tag, AT_CMD_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+            g_step = 0u;                /* 这一拍结束, 下一拍按限速再发 */
+
+            if (r == G4_CMD_OK)
+            {
+                stat              = at_reg_stat(g4_io_cmd_resp(), tag);
+                g_info.reg_status = stat;
+
+                /* 1=已注册(本地) 5=已注册(漫游) */
+                if ((stat == 1u) || (stat == 5u))
+                {
+                    log_info("[G4] registered (%s stat=%u)\r\n", cmd, (unsigned)stat);
+                    g_pdp_retry    = 0u;
+                    g_dialup_tried = false;
+                    apn_build_candidates();   /* 注册上了 -> 按 IMSI 定第一个 APN 候选 */
+                    g4_goto_state(G4_STATE_CGDCONT);
+                    break;
+                }
+                /* 0=没注册也没在搜 / 2=没注册但在搜 / 3=被拒 —— 前两种都是"再等等" */
+            }
+            else if (r == G4_CMD_ERR)
+            {
+                /* 模组【明确回 ERROR】才当不支持这条命令 -> 换另一种注册域 */
+                log_info("[G4] %s 不支持(模组回了 ERROR) -> 换下一种\r\n", cmd);
+                g_reg_probe++;
+                if (g_reg_probe > 2u)
+                {
+                    g_reg_probe = 0u;
+                }
+            }
+            else
+            {
+                /* 【一句应答都没有 ≠ 不支持 —— 这是之前踩过的误判】
+                 * 现场实测: 发 AT+CEREG? 回来的却是 "+MATREADY"(模组刚重启), 于是这条
+                 * 命令"没有应答", 老代码直接判成不支持就把查询方式换掉了。
+                 * 现在: 没应答只当"这一拍没问到", 【保持同一种查询方式】按节奏重试。 */
+                log_info("[G4] %s 无应答(模组可能正在起动/重新入网, 不是不支持) -> 稍后重试\r\n",
+                         cmd);
+            }
+
+            if (g_retry_cnt >= AT_CEREG_POLL_MAX)
+            {
+                /* 【注册查询超时 ≠ 不能上网 —— 不再发 CFUN=1,1 去软复位模组】
+                 * 原来这里是 CFUN + 等 10s + 从头握手: 那等于把模组刚攒起来的入网进度
+                 * 又清掉一次。而且 3GPP 里"注册不上"不等于"PDP 起不来" —— 有些网络/卡
+                 * 就是 CEREG 报得慢, 但 CGDCONT/CGACT 照样能激活并分到 IP。
+                 * 所以现在: 报清楚, 然后【照常往下走】去 CGDCONT/CGACT/CGPADDR 试,
+                 * 拿不拿到 IP 才是唯一判据 —— 这正是 ml307_app.c 的做法。 */
+                log_info("[G4] 注册查询超时 %us(最后 stat=%u '%s') -> 不再复位模组, "
+                         "继续去激活 PDP 试\r\n",
+                         (unsigned)((AT_CEREG_POLL_MAX * AT_CEREG_POLL_MS) / 1000u),
+                         (unsigned)stat, g4_reg_stat_text(stat));
+                log_info("[G4] (提示: 注册状态难看时, 先看 VBAT 和 CSQ —— "
+                         "欠压/无信号才是常见原因)\r\n");
+                g4_goto_state(G4_STATE_CGDCONT);
+                break;
+            }
+
+            if ((g_retry_cnt % 5U) == 0U)
+            {
+                /* 每 5 次(10s)报一次进度就够了, 免得日志被"还没注册"刷屏。
+                 * 【顺便刷新一次模组自测供电】: 注册阶段正是模组"使劲搜网/发射"的时候,
+                 * 供电最容易塌 —— 现场就是靠这一行看到 VBAT 掉到 2.5V 的。 */
+                log_info("[G4] wait reg %us(stat=%u CSQ=%u VBAT=%umV)...\r\n",
+                         (unsigned)((g_retry_cnt * AT_CEREG_POLL_MS) / 1000u),
+                         (unsigned)stat, (unsigned)g_info.csq, (unsigned)g_info.vbat_mv);
+                (void)g4_read_vbat();       /* 读一次并更新状态行/上面的值 */
+            }
+
+            /* 【注册被拒 = stat 3】: 网络明确说"不让你注册", 和"还在搜"完全不同。
+             * 但先看供电 —— 模组在欠压时也会报 3(它压根没力气把入网流程走完)。 */
+            if (stat == 3u)
+            {
+                log_info("[G4] !! 注册被【拒绝】(stat=3) —— 不是没信号, 是网络不接受\r\n");
+                log_info("[G4] !! 先看供电: 模组自测 VBAT=%umV (正常要 3400mV 以上)——"
+                         "欠压时模组会一直重来, 表现就包括 stat=3\r\n",
+                         (unsigned)g_info.vbat_mv);
+                log_info("[G4] !! 供电正常再查: SIM 是否欠费/停机 / 该卡是否被限了 4G 权限 / "
+                         "模组是否只认某个网络制式\r\n");
+                g_step = 2u;        /* 下一拍开始: CFUN 软复位 -> 等 10s -> 回 AT_SYNC */
+            }
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_CGDCONT ---- */
+static void g4_st_cgdcont(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* 设 APN(ml307_app.c: AT+CGDCONT=1,"IP","CMNET")。失败(比如已经设过)
+             * 不影响后续, 继续去激活 PDP。 */
+            g4_cmd_res_t r;
+
+            if (g_step == 0u)
+            {
+                /* 【先清旧 PDP 上下文, 再设 APN】
+                 * MQTT/TCP 异常断开、或者上一轮换 APN 试错之后, 同一个 CID 的 PDP
+                 * 上下文常常留着"脏"状态。直接再 CGDCONT/CGACT 会偶发激活失败, 严重时
+                 * 射频侧卡住 —— 表现就是 AT 还能应答、但 CSQ=99 搜不到网。
+                 * AT+CGACT=0,1 是标准 3GPP 的"去激活 CID 1", 先放一条把上下文放掉。
+                 * 本来就没激活时它可能回 ERROR 或没 OK, 都【不影响流程】, 只看日志。 */
+                r = g4_io_cmd_run("AT+CGACT=0,1", "OK", AT_PDP_DEACT_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+
+                if (r == G4_CMD_OK)
+                {
+                    log_info("[G4] 旧 PDP 上下文已去激活(CGACT=0,%u)\r\n",
+                             (unsigned)G4_PDP_CID);
+                }
+                else
+                {
+                    log_info("[G4] CGACT=0,%u 无 OK(本来没激活时正常), 继续\r\n",
+                             (unsigned)G4_PDP_CID);
+                }
+                g_step = 1u;
+                break;
+            }
+
+            if (g_step == 1u)
+            {
+                const char *apn = g_apn_list[g_apn_idx];
+
+                snprintf(g_tx_cmd, sizeof(g_tx_cmd), "AT+CGDCONT=%u,\"IP\",\"%s\"",
+                         (unsigned)G4_PDP_CID, apn);
+                g_step = 2u;
+            }
+
+            r = g4_io_cmd_run(g_tx_cmd, "OK", AT_CMD_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+
+            if (r == G4_CMD_OK)
+            {
+                log_info("[G4] APN %u/3: %s\r\n",
+                         (unsigned)(g_apn_idx + 1u), g_apn_list[g_apn_idx]);
+            }
+            else
+            {
+                log_info("[G4] APN no OK(continue)\r\n");
+            }
+            g4_goto_state(G4_STATE_CGACT);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_CGACT ---- */
+static void g4_st_cgact(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* 激活 PDP: 首次入网可能要十几秒, 给 15s(和 ml307_app.c 一致) */
+            g4_cmd_res_t r;
+
+            if (g_step == 0u)
+            {
+                snprintf(g_tx_cmd, sizeof(g_tx_cmd), "AT+CGACT=1,%u", (unsigned)G4_PDP_CID);
+                g_step = 1u;
+            }
+
+            r = g4_io_cmd_run(g_tx_cmd, "OK", AT_PDP_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+
+            if (r == G4_CMD_OK)
+            {
+                log_info("[G4] PDP activated\r\n");
+            }
+            else
+            {
+                log_info("[G4] %s no OK, check IP\r\n", g_tx_cmd);
+            }
+            g4_goto_state(G4_STATE_CGPADDR);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_CGPADDR ---- */
+static void g4_st_cgpaddr(uint32_t now)
+{
+    do
+    {
+        {
+            /* 【拿 IP 才是真的通了】: CGACT 回 OK 只说明命令被接受, PDP 是否真起来
+             * 要看 CGPADDR(ml307_app.c 里也是用空 IP 判 PDP 失败)。 */
+            g4_cmd_res_t r;
+
+            /* 换 APN 之前等 1s(原来是 delay_ms(1000), 现在只算时间戳, 不阻塞) */
+            if (g_step == 5u)
+            {
+                if ((uint32_t)(now - g_wait_tick) >= 1000u)
+                {
+                    g4_goto_state(G4_STATE_CGDCONT);
+                }
+                break;
+            }
+
+            if (g_step == 0u)
+            {
+                snprintf(g_tx_cmd, sizeof(g_tx_cmd), "AT+CGPADDR=%u", (unsigned)G4_PDP_CID);
+                g_step = 1u;
+            }
+
+            r = g4_io_cmd_run(g_tx_cmd, "+CGPADDR:", AT_CMD_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+            g_step = 0u;
+
+            if ((r == G4_CMD_OK) &&
+                at_take_ipv4(g4_io_cmd_resp(), g_info.ip, G4_IP_LEN))
+            {
+                g_info.pdp_ok = true;
+                log_info("[G4] PDP got IP: %s\r\n", g_info.ip);
+                g4_goto_state(G4_STATE_AFTER_IP);
+                break;
+            }
+
+            g_pdp_retry++;
+            if (g_pdp_retry < G4_PDP_ADDR_RETRY_MAX)
+            {
+                /* 拿不到 IP 最常见的原因就是 APN 不对(尤其换运营商的卡):
+                 * 换下一家的 APN, 重新 CGDCONT -> CGACT -> CGPADDR 走一遍 */
+                g_apn_idx = (uint8_t)((g_apn_idx + 1u) % 3u);
+                log_info("[G4] no IP -> 换 APN %s\r\n", g_apn_list[g_apn_idx]);
+                g_step      = 5u;           /* 先等 1s 再回 CGDCONT */
+                g_wait_tick = now;
+                break;
+            }
+
+            /* 【注意】拨号在开局就已经试过了, 走到这里说明两条路都没拿到 IP ——
+             * 再回去拨一次没有意义, 直接进 ERROR 走恢复流程。 */
+            log_info("[G4] no IP(拨号与 PDP 都失败) -> rebuild\r\n");
+            g4_goto_state(G4_STATE_ERROR);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_DIALUP ---- */
+static void g4_st_dialup(uint32_t now)
+{
+    do
+    {
+        {
+            /* 【说明】现场最终走的是"标准 3GPP: CEREG -> CGDCONT -> CGACT -> CGPADDR"
+             * 这条主路(见 G4_STATE_AFTER_IP), G4_STATE_DIALUP 目前【没有任何地方会
+             * 切进来】—— 保留它只是为了台架手工核对 AT+MDIALUP 的行为(日志口 #dial)。
+             * 这里同样改成非阻塞子步骤, 免得哪天有人把它接回主路时又带进 delay_ms。 */
+            g4_cmd_res_t r;
+
+            if (g_step == 3u)       /* 拨号之后等 3s 再查结果 */
+            {
+                if ((uint32_t)(now - g_wait_tick) >= 3000u)
+                {
+                    g_step = 4u;
+                }
+                break;
+            }
+
+            if (g_step == 0u)
+            {
+                r = g4_io_cmd_run("AT+MDIALUP?", "+MDIALUP:", AT_CMD_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+
+                if ((r == G4_CMD_OK) &&
+                    at_take_v4_quoted(g4_io_cmd_resp(), g_info.ip, G4_IP_LEN))
+                {
+                    g_info.pdp_ok = true;
+                    log_info("[G4] 拨号已在连接状态(AT+MDIALUP?), IP=%s\r\n", g_info.ip);
+                    g4_goto_state(G4_STATE_REG_CHECK);
+                    break;
+                }
+                g_step = 1u;
+                break;
+            }
+
+            if (g_step == 1u)
+            {
+                r = g4_io_cmd_run("AT+MDIALUP=1,1", "OK", AT_DIALUP_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+
+                if (r == G4_CMD_OK)
+                {
+                    log_info("[G4] AT+MDIALUP=1,1 已下发, 等拨号结果...\r\n");
+                }
+                else
+                {
+                    log_info("[G4] AT+MDIALUP=1,1 没回 OK(第 %u 次)\r\n",
+                             (unsigned)(g_retry_cnt + 1u));
+                }
+                g_step      = 3u;       /* 给它 3s 让 URC 回来 */
+                g_wait_tick = now;
+                break;
+            }
+
+            /* g_step == 4: 再查一次拨号状态 */
+            r = g4_io_cmd_run("AT+MDIALUP?", "+MDIALUP:", AT_CMD_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+            g_step = 0u;
+
+            if ((r == G4_CMD_OK) &&
+                at_take_v4_quoted(g4_io_cmd_resp(), g_info.ip, G4_IP_LEN))
+            {
+                g_info.pdp_ok = true;
+                log_info("[G4] 拨号成功: IP=%s (第 %u 次)\r\n",
+                         g_info.ip, (unsigned)(g_retry_cnt + 1u));
+                g4_goto_state(G4_STATE_REG_CHECK);
+                break;
+            }
+
+            g_retry_cnt++;
+            if (g_retry_cnt <= G4_DIALUP_RETRY_MAX)
+            {
+                log_info("[G4] 拨号没拿到 IP(第 %u/%u 次), 下一轮再试\r\n",
+                         (unsigned)g_retry_cnt, (unsigned)G4_DIALUP_RETRY_MAX);
+                g_step      = 3u;
+                g_wait_tick = now;      /* 也等 2~3s, 不阻塞主循环 */
+                break;
+            }
+
+            log_info("[G4] !! 拨号 %u 次都没拿到 IP -> 退回老流程(CEREG/CGDCONT/CGACT/CGPADDR)\r\n",
+                     (unsigned)G4_DIALUP_RETRY_MAX);
+            log_info("[G4] !! 提示: 拨号失败多半还是网络侧(注册被拒/无信号/SIM 状态), "
+                     "先看下面 CEREG 的 stat 和 VBAT\r\n");
+            g4_goto_state(G4_STATE_CREG);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_REG_CHECK ---- */
+static void g4_st_reg_check(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* 【拨号之后的诊断检查 —— 只查、只打印, 不当闸门】
+             * 拨号已经把 IP 拿到手了, 所以无论 stat 是什么都继续往下走(去连 MQTT)。 */
+            g4_cmd_res_t r;
+
+            if (g_step == 0u)
+            {
+                r = g4_io_cmd_run("AT+CEREG?", "+CEREG:", AT_CMD_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+
+                if (r == G4_CMD_OK)
+                {
+                    g_info.reg_status = at_reg_stat(g4_io_cmd_resp(), "+CEREG:");
+                    log_info("[G4] GSM/PS 注册状态 AT+CEREG? stat=%u (%s) | CSQ=%u IP=%s VBAT=%umV\r\n",
+                             (unsigned)g_info.reg_status,
+                             g4_reg_stat_text(g_info.reg_status),
+                             (unsigned)g_info.csq,
+                             (g_info.ip[0] != '\0') ? g_info.ip : "-",
+                             (unsigned)g_info.vbat_mv);
+                    g_step = 2u;
+                    break;
+                }
+                g_step = 1u;
+                break;
+            }
+
+            if (g_step == 1u)
+            {
+                r = g4_io_cmd_run("AT+CGREG?", "+CGREG:", AT_CMD_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+
+                if (r == G4_CMD_OK)
+                {
+                    g_info.reg_status = at_reg_stat(g4_io_cmd_resp(), "+CGREG:");
+                }
+                log_info("[G4] GSM/PS 注册状态 AT+CGREG? stat=%u (%s) | CSQ=%u IP=%s VBAT=%umV\r\n",
+                         (unsigned)g_info.reg_status,
+                         g4_reg_stat_text(g_info.reg_status),
+                         (unsigned)g_info.csq,
+                         (g_info.ip[0] != '\0') ? g_info.ip : "-",
+                         (unsigned)g_info.vbat_mv);
+                g_step = 2u;
+                break;
+            }
+
+            (void)g4_read_vbat();       /* 顺手刷新供电, 低压会自己告警 */
+            g4_goto_state(G4_STATE_AFTER_IP);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_MQTT_DISC ---- */
+static void g4_st_mqtt_disc(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* 清理残留连接, 无论成败继续。
+             * 关键字传 NULL: 引擎只等 G4_MQTT_DISC_WAIT_MS 让模组消化一下,
+             * 到点返回 TIMEOUT, 正是我们要的"等一会儿就往下走"。 */
+            g4_cmd_res_t r = g4_io_cmd_run_silent("AT+MQTTDISC=" G4_MQTT_CONNECT_ID,
+                                                  G4_MQTT_DISC_WAIT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+            /* 【先配模组参数, 再建连接】: 手册要求 MQTTCFG 系列在"MQTT 连接未创建"时
+             * 下发 —— 此刻刚 DISC 完, 正是这个条件。 */
+            g4_goto_state(G4_STATE_MQTT_CFG);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_MQTT_CFG ---- */
+static void g4_st_mqtt_cfg(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* ---- 把【模组自己的能力】配好(2026-10-04 第 2 步) ----
+             * 遗嘱 / keepalive / pingreq / pingresp / reconn 一条条下发。
+             * 【每轮建链都重下发】手册明确"模组掉电后配置参数不保存"。
+             * 【任何一条失败都只记日志并继续】—— 这是"让模组干得更专业", 不是建链前提;
+             * 绝不能因为它连不上 broker。 */
+            static char cfg_cmd[256];
+            g4_cmd_res_t r;
+
+            if (g_step < (uint8_t)G4_MQTT_CFG_STEPS)
+            {
+                if (!mqtt_cfg_build((uint8_t)g_step, cfg_cmd, (uint16_t)sizeof(cfg_cmd)))
+                {
+                    g_step++;           /* 这一步不需要发(例如没配遗嘱) -> 跳过 */
+                    break;
+                }
+
+                r = g4_io_cmd_run(cfg_cmd, "OK", AT_CMD_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+
+                if (r == G4_CMD_OK)
+                {
+                    log_info("[4G] 模组参数已接受: %s\r\n", cfg_cmd);
+                }
+                else
+                {
+                    log_info("[4G] !! 模组参数未接受(res=%d): %s —— 跳过, 不影响建链\r\n",
+                             (int)r, cfg_cmd);
+                }
+                g_step++;
+                break;
+            }
+
+            g4_goto_state(G4_STATE_MQTT_CONN);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_MQTT_CONN ---- */
+static void g4_st_mqtt_conn(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            g4_cmd_res_t r;
+
+            if (g_step == 0u)
+            {
+                g4_urc_reset_conn_state();   /* 清掉上一次的 conn 结果, 便于失败时看原因 */
+                /* 【记下"发这条 MQTTCONN 之前"的 conn URC 序号】: 之后 WAIT_CONN 只认
+                 * 序号变新了的那条 conn 结果 —— 时序上必须在这里取基准(不是在收到 OK
+                 * 之后), 否则"命令在途时到达的 conn URC"会被我们当成旧的而漏掉。 */
+                s_conn_seq_base = g4_urc_conn_seq();
+                if (!mqtt_build_conn_cmd(g_tx_cmd, sizeof(g_tx_cmd)))
+                {
+                    log_info("[G4] MQTTCONN 命令组装失败 -> rebuild\r\n");
+                    g4_goto_state(G4_STATE_ERROR);
+                    break;
+                }
+                g_step = 1u;
+            }
+
+            r = g4_io_cmd_run(g_tx_cmd, "OK", AT_CONN_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+
+            if (r == G4_CMD_OK)
+            {
+                g4_goto_state(G4_STATE_WAIT_CONN);
+                break;
+            }
+
+            if (++g_retry_cnt > 3U)
+            {
+                log_info("[G4] MQTTCONN rejected -> rebuild\r\n");
+                g4_goto_state(G4_STATE_ERROR);
+            }
+            else
+            {
+                g_step = 0u;                /* 下一拍重新组装再试 */
+            }
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_WAIT_CONN ---- */
+static void g4_st_wait_conn(uint32_t now)
+{
+    do
+    {
+            /* conn URC 由收包泵->g4_urc 维护在线状态, 这里只查结果。
+             * ⚠️ 必须【同时】要求"本次 MQTTCONN 之后新到了一条 conn URC"(序号变了)。
+             *    只看 g4_urc_is_online() 会被上一轮的在线标志骗过去 —— 现场日志 78.txt
+             *    就是这么白烧 30~40 秒的:
+             *        [G4] MQTT conn ok (res=255 unknown)   ← 255 = 本次一条 conn URC 都没收到
+             *        [G4] -> MQTT_SUB
+             *        +CME ERROR: 607 ×4  ->  MQTTSUB fail -> rebuild
+             */
+            if ((g4_urc_conn_seq() != s_conn_seq_base) && g4_urc_is_online())
+            {
+                log_info("[G4] MQTT conn ok (res=%u %s)\r\n",
+                         (unsigned)g4_urc_get_conn_state(),
+                         g4_conn_state_text(g4_urc_get_conn_state()));
+                g4_goto_state(G4_STATE_MQTT_SUB);
+            }
+            else if ((now - g_state_tick) >
+                     (g_mqtt_fast_active ? AT_URC_TIMEOUT_FAST_MS : AT_URC_TIMEOUT_MS))
+            {
+                uint8_t st = g4_urc_get_conn_state();
+
+                /* ★★2026-10-08: 快修路径拿不到 conn URC ⇒ 【立刻断电】, 不再白等★★
+                 *
+                 * 【现场现象】模组欠压重启后, MQTTCONN 回 OK 但一条 conn URC 都没有
+                 *   (既不报连上也不报失败)。这是"模组 MQTT 栈已坏"的特征 ——
+                 *   轻量的 DISC/CFG/CONN/SUB 重建【救不回来】, 只有整颗模组断电重启才行。
+                 *   实测: 最后就是靠 4G_RST 断电才重连成功的。
+                 *
+                 * 【为什么不再走 G4_STATE_ERROR】那条路会重试, 而重试用的是同一个坏栈,
+                 *   结果是"60 秒 x 最多 3 次 = 3 分钟"的纯白等。既然已经能判定
+                 *   "模组栈坏了", 就直接跳到唯一有效的处置 —— 断电重置。
+                 *
+                 * 【代价可控】断电恢复要 40~60 秒, 但【一定成功】; 白等 3 分钟然后
+                 *   照样断电, 是纯亏。 */
+                if (g_mqtt_fast_active)
+                {
+                    log_info("[G4] !! 快修在 WAIT_CONN 等了 %us 都没有 conn URC(last=%u/%s)"
+                             " —— 模组 MQTT 栈已坏, 轻量重建救不回来, 【直接断电重置模组】\r\n",
+                             (unsigned)(AT_URC_TIMEOUT_FAST_MS / 1000u),
+                             (unsigned)st, g4_conn_state_text(st));
+                    g_mqtt_fast_cnt    = 0u;
+                    g_mqtt_suspect     = false;
+                    g_mqtt_fast_active = false;
+                    g4_link_recover("快修在 WAIT_CONN 拿不到 conn URC(模组 MQTT 栈已坏)");
+                    break;
+                }
+
+                log_info("[G4] conn URC timeout, last=%u(%s)\r\n",
+                         (unsigned)st, g4_conn_state_text(st));
+                g4_goto_state(G4_STATE_ERROR);
+            }
+            break;
+    } while (0);
+}
+
+/* ---- G4_STATE_MQTT_SUB ---- */
+static void g4_st_mqtt_sub(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* 订阅 topic 是运行期可变的(见 g4_at_set_sub_topic), 所以这里拼一次命令。
+             * 用静态缓冲: g4_io_cmd_run() 在调用期间会用到这个指针。
+             * ★2026-10-08: 没有编译期兜底主题了 —— 空 = main.c 没注入, 明确报错并跳过。 */
+            static char   subcmd[G4_SUB_TOPIC_MAX + 48];
+            g4_cmd_res_t  r;
+
+            if (g_sub_topic[0] == '\0')
+            {
+                log_info("[G4] !! 下行订阅 topic 为空 —— main.c 没有注入(应为本机 rt/gw/{gwId}/cmd)"
+                         ", 【跳过订阅】: 上行仍可发, 但收不到任何云端命令\r\n");
+                g4_urc_set_online();
+                g4_pub_mark_ok();
+                g4_goto_state(G4_STATE_REG_ARM);
+                break;
+            }
+
+            (void)snprintf(subcmd, sizeof(subcmd), "AT+MQTTSUB=%s,\"%s\",%s",
+                           G4_MQTT_CONNECT_ID, g_sub_topic, G4_MQTT_SUB_QOS);
+
+            r = g4_io_cmd_run(subcmd, "OK", AT_CMD_TIMEOUT_MS);
+            if (r == G4_CMD_RUNNING) { break; }
+
+            if (r == G4_CMD_OK)
+            {
+                g4_urc_set_online();
+                local_alarm_clear(ALARM_4G_OFFLINE);
+                g_fail_cnt = 0u;        /* 真的连上了: 失败预算清零 */
+                g_pub_prompt_loss = 0u; /* 新链路: 连续丢 '>' 的计数也清零 */
+                g_mqtt_fast_cnt   = 0u; /* 回来了: MQTT 快修连败计数清零 */
+                /* ★2026-10-08: 快修标记也在这里清 —— 订阅成功才算"快修真的救回来了"。
+                 * 放在这里而不是 DISCONN/ONLINE: 万一后来 SUB 失败又走了别的恢复路径,
+                 * 标记留着不会有害(下次冷启动建链时会重新走 WAIT_CONN 的 60 秒分支吗?
+                 * 不会 —— 见下面 g4_at_init 里的清零), 但清了更干净。 */
+                g_mqtt_fast_active = false;
+                g_pub_noack_cnt   = 0u;
+                g_mqtt_suspect    = false;
+                log_info("===== MQTT ONLINE! =====\r\n");
+                /* 保活计时从"上线"这一刻起算, 免得把建链花掉的时间算进停滞窗口 */
+                g4_pub_mark_ok();
+                /* ★2026-10-08: 这里原来还打了 pub=mod/mod_upload —— 那条通道已删除。
+                 * 现在打三个真正生效的值: clientID / user / sub(下行主题)。
+                 * clientID 必须打【实际发出去的那个】—— 配成特殊值 "IMEI" 时它不是 g_client_id,
+                 * 所以这里按 mqtt_build_conn_cmd 的同一套规则算一遍(否则日志会骗人)。 */
+                log_info("[G4] clientID=%s user=%s sub=%s\r\n",
+                         ((strcmp(g_client_id, "IMEI") == 0) && (g_info.imei[0] != '\0'))
+                             ? g_info.imei
+                             : ((g_client_id[0] != '\0') ? g_client_id : G4_MQTT_CLIENT_ID),
+                         (g_broker_user[0] != '\0') ? g_broker_user : "-",
+                         g_sub_topic);
+                log_info("[G4] IMEI=%s IMSI=%s ICCID=%s CSQ=%u IP=%s\r\n",
+                         (g_info.imei[0]  != '\0') ? g_info.imei  : "-",
+                         (g_info.imsi[0]  != '\0') ? g_info.imsi  : "-",
+                         (g_info.iccid[0] != '\0') ? g_info.iccid : "-",
+                         (unsigned)g_info.csq,
+                         (g_info.ip[0]    != '\0') ? g_info.ip    : "-");
+                if (g_info.vbat_valid)
+                {
+                    log_info("[G4] 模组自测供电 = %u mV\r\n", (unsigned)g_info.vbat_mv);
+                }
+                /* 【去 G4_STATE_REG_ARM 而不是直接 ONLINE】: 上线之前把驻网/PS 变化的
+                 * 主动上报打开。放在这里(而不是 ONLINE 里)是本工程的一条硬不变式 ——
+                 * ONLINE 稳态下不许发 AT, 详见 g4_cereg_diag_poll() 上面的长注释。 */
+                g4_goto_state(G4_STATE_REG_ARM);
+                break;
+            }
+
+            if (++g_retry_cnt > 3U)
+            {
+                log_info("[G4] MQTTSUB fail -> rebuild\r\n");
+                g4_goto_state(G4_STATE_ERROR);
+            }
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_REG_ARM ---- */
+static void g4_st_reg_arm(uint32_t now)
+{
+    (void)now;
+    do
+    {
+        {
+            /* ---- 上线前最后一次配置: 让模组主动报"驻网 / PS 去附着"变化 ----
+             *
+             * 【为什么必须在这里做】
+             *   ① 本工程有一条被主机测试钉死的不变式: ONLINE 稳态下不许发任何多余 AT
+             *      (test_state.c 的 "ONLINE 稳态下 5 秒内发的 AT 命令数 = 0")。现场日志
+             *      也证实"在 ONLINE 里敲 AT"会诱发模组 AT 应用重启(+MATREADY 387 次,
+             *      全部落在我们发字节后 8~49ms)并打死 MQTT 会话。所以这两条必须在
+             *      上线【之前】发。
+             *   ② 手册要求 MQTTCFG 类命令在"MQTT 连接未创建"时下发更稳 —— 此刻还没
+             *      MQTTCONN, 正合适。
+             *   ③ 每轮建链(MQTT 快修/断电重启之后)都会重新走一遍: 模组自己重启或整链路
+             *      断电后这两个设置可能已被清掉。
+             *
+             * 【失败了绝不影响建链】: 这只是观测手段。发不出去就退化成"没有主动上报",
+             * 与加这个功能之前的行为一致 —— 绝不能因为它连不上 broker。
+             *
+             * 【只读性质】这两条命令只改变"模组报不报", 不改变我们的任何判定逻辑;
+             * 本工程此刻还没有任何一处消费 g_cereg.stat(第 2 步才阈值化)。 */
+    #if (G4_CEREG_DIAG_ENABLE && G4_CEREG_URC_ENABLE)
+            {
+                g4_cmd_res_t r;
+
+                if (g_step == 0u)
+                {
+                    r = g4_io_cmd_run("AT+CEREG=2", "OK", AT_CMD_TIMEOUT_MS);
+                    if (r == G4_CMD_RUNNING) { break; }
+                    if (r == G4_CMD_OK)
+                    {
+                        log_info("[CEREG] AT+CEREG=2 已下发 —— 模组会主动上报驻网变化\r\n");
+                    }
+                    else
+                    {
+                        log_info("[CEREG] !! AT+CEREG=2 没成功(res=%d) —— 没有驻网主动上报,"
+                                 "不影响建链\r\n", (int)r);
+                    }
+                    g_step = 1u;
+                    break;
+                }
+
+                if (g_step == 1u)
+                {
+                    r = g4_io_cmd_run("AT+CGEREP=1", "OK", AT_CMD_TIMEOUT_MS);
+                    if (r == G4_CMD_RUNNING) { break; }
+                    if (r == G4_CMD_OK)
+                    {
+                        g_cereg.urc_armed = true;
+                        log_info("[CEREG] AT+CGEREP=1 已下发 —— PS 去附着会主动上报"
+                                 "(+CGEV: NW DETACH 是最强的断网证据)\r\n");
+                    }
+                    else
+                    {
+                        log_info("[CEREG] !! AT+CGEREP=1 没成功(res=%d) —— 没有 PS 事件上报,"
+                                 "不影响建链\r\n", (int)r);
+                    }
+                    g_step = 2u;
+                    break;
+                }
+
+                if (g_step == 2u)
+                {
+                    /* 【上线前把当前驻网状态量一次】—— 这是唯一一次可靠地拿到 <stat> 的
+                     * 机会: 开机之后只有这里能问 (ONLINE 稳态不许发 AT, 见上面的长注释)。
+                     * URC 只在"变化时"才来, 没有这个种子值就不知道起点是好是坏。
+                     * 用 at_reg_stat() 按【轮询应答形态】解析 (<n>,<stat>)。 */
+                    r = g4_io_cmd_run("AT+CEREG?", "+CEREG:", AT_CMD_TIMEOUT_MS);
+                    if (r == G4_CMD_RUNNING) { break; }
+
+                    if (r == G4_CMD_OK)
+                    {
+                        uint8_t stat = at_reg_stat(g4_io_cmd_resp(), "+CEREG:");
+
+                        if (stat != 0xFFu)
+                        {
+                            g_cereg.stat = stat;
+                            log_info("[CEREG] 上线前驻网状态: stat=%u (%s)\r\n",
+                                     (unsigned)stat, g4_reg_stat_text(stat));
+                        }
+                        else
+                        {
+                            log_info("[CEREG] 上线前 AT+CEREG? 应答里没有 stat, 原样: %s\r\n",
+                                     g4_io_cmd_resp());
+                        }
+                    }
+                    else
+                    {
+                        log_info("[CEREG] !! 上线前 AT+CEREG? 没应答(res=%d) —— 驻网状态未知\r\n",
+                                 (int)r);
+                    }
+                    g_step = 3u;
+                    break;
+                }
+            }
+    #endif
+            g4_goto_state(G4_STATE_ONLINE);
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_ONLINE ---- */
+static void g4_st_online(uint32_t now)
+{
+    do
+    {
+        {
+            /* 【先看: 在线期间模组偷偷重启过没有?】
+             * 现场证据(日志 78.txt):
+             *   1) 每一次 "+MATREADY" 都紧跟在我们的命令之后(距上次发送 10~41ms);
+             *   2) 每个会话都是"第 1 条 MQTTPUB 被收下但 broker 不回 puback, 第 2 条起回 601";
+             *   3) 模组【不发 conn URC】, 所以状态机一直以为还在线。
+             * 结论: 模组 AT 应用层一重启, MQTT 会话就没了, 而且没有任何人告诉我们。
+             * 处理: 标记"会话可疑"并大声报出来 —— 下一次发布只要失败或拿不到 puback,
+             *       pub_poll 里就会走 MQTT 快修(2~5 秒), 而不是攒够失败去断电(40~60 秒)。 */
+            if (g4_io_ready_total() != g_ready_base_online)
+            {
+                g_ready_base_online = g4_io_ready_total();
+                g_mqtt_suspect      = true;
+                log_info("[G4] !! ONLINE 期间模组报出 \"+MATREADY\"(AT 应用层重启过, 累计 %lu 次)"
+                         " —— MQTT 会话多半已经没了, 标记【可疑】; 下一次发布失败就走 MQTT 快修\r\n",
+                         (unsigned long)g_ready_base_online);
+            }
+
+            /* 【保活停滞看门狗】: 详见 g4_at_set_link_watchdog() 的说明。
+             * 窗口由 main.c 按实际心跳周期设定(心跳开着 = 5 × 周期, 关着 = 0 即不用)。
+             * ⚠️ 【必须用有符号比较 —— 这里踩过一次, 就是"中间那次自动重启"的原因】
+             * 无符号相减在 tick 反超时会得到 0xFFFFFFFF(≈4294967 秒), 于是"保活停滞"
+             * 当场误报, 链路被无端重建。
+             * ★2026-10-04 第 2 步: 模组正在自己重连(conn state=1)时【不开这条枪】★
+             *   模组此刻是在干活的, 而且它配了 reconn(默认 20/40/60s)。看门狗这时候
+             *   开火, 等于在它刚要回来时又把它按下去 —— 现场那 27 次断电里有一大半
+             *   就是这么来的。让开的时限由 G4_MQTT_RECONN_GRACE_MS 兜住(超过它
+             *   g4_at_poll 里的 conn 分支会走 MQTT 快修)。 */
+            if ((g_hb_stall_ms != 0u) && g_last_pub_ok_valid &&
+                (g_mqtt_reconn_since == 0u) &&
+                ((int32_t)((uint32_t)now - g_last_pub_ok_tick) > (int32_t)g_hb_stall_ms))
+            {
+                log_info("[G4] !! 保活停滞: 已经 %lus 没有一次发布成功"
+                         "(窗口 %lus) -> 判链路已死\r\n",
+                         (unsigned long)(((uint32_t)now - g_last_pub_ok_tick) / 1000u),
+                         (unsigned long)(g_hb_stall_ms / 1000u));
+                log_info("[G4] !! 常见原因: 模组假死(MQTT 掉了但不发 URC) / 中间 NAT 把连接掐了\r\n");
+                /* 计数清零后交给统一恢复入口(4G_RST 断电重启, 带最小间隔防抖) */
+                g_pub_fail_cnt = 0U;
+                g4_link_recover("保活停滞(长时间没有一次发布成功)");
+            }
+            /* 保活由模组内部 PINGREQ + 应用层 GW_ONLINE 心跳共同维持;
+             * 断线由 g4_urc 的 conn URC 和发布失败计数检测;
+             * 上行是否真的到云端, 由 QoS 1 的 puback 说话(g4_urc_puback_count)。 */
+            break;
+        }
+    } while (0);
+}
+
+/* ---- G4_STATE_DIAG_DONE ---- */
+static void g4_st_diag_done(uint32_t now)
+{
+    do
+    {
+            /* 【自检档的终点】G4_DIAG_STOP_AFTER_PDP=1 时停在这里: 只验收到
+             * "AT 沟通正常 + 已入网拿到 IP", 不碰 MQTT。每 30s 重查一次信号,
+             * 既能持续证明链路是活的, 又不会因为 MQTT 连不上把网络链路拆掉重来。 */
+            if ((now - g_state_tick) > 30000u)
+            {
+                g4_cmd_res_t r;
+
+                g_state_tick = now;
+                log_info("[G4] [自检] 模组沟通正常 IMEI=%s IP=%s CSQ=%u%s%u mV\r\n",
+                         (g_info.imei[0] != '\0') ? g_info.imei : "-",
+                         (g_info.ip[0] != '\0') ? g_info.ip : "-",
+                         (unsigned)g_info.csq,
+                         g_info.vbat_valid ? " 供电=" : "",
+                         (unsigned)g_info.vbat_mv);
+
+                r = g4_io_cmd_run("AT+CSQ", "+CSQ:", AT_CMD_TIMEOUT_MS);
+                if (r == G4_CMD_RUNNING) { break; }
+
+                if (r == G4_CMD_OK)
+                {
+                    log_info("[G4] [自检] AT+CSQ 应答: %s\r\n", g4_io_cmd_resp());
+                    /* 模组是不是被供电搞死最直接的一条: 每轮自检都读一次它的自测电压 */
+                    (void)g4_read_vbat();
+                }
+                else
+                {
+                    log_info("[G4] [自检] !! AT+CSQ 不应答了: 模组可能掉电/死机, 重新建链\r\n");
+                    g4_goto_state(G4_STATE_ERROR);
+                }
+            }
+            break;
+    } while (0);
+}
+
+/* ---- G4_STATE_ERROR ---- */
+static void g4_st_error(uint32_t now)
+{
+    do
+    {
+            g4_urc_set_offline();
+            g_pub_pending = false;
+            g_info.pdp_ok = false;
+            g_info.ip[0]  = '\0';
+            local_alarm_trigger(ALARM_4G_OFFLINE);
+            if ((now - g_state_tick) > G4_FAIL_RESTART_MS)
+            {
+                g_fail_cnt++;
+
+                /* 【连续 G4_REBUILD_RST_CNT 次重建都没能回到 ONLINE】
+                 * 说明"只重新握手"这条路走不通了(模组卡在某个状态、或者网络侧根本没
+                 * 恢复), 这时候按现场要求上 4G_RST: 断电重启模组。 */
+                if (g_fail_cnt >= G4_REBUILD_RST_CNT)
+                {
+                    g_fail_cnt = 0u;
+                    g4_link_recover("连续建链失败(重新握手已试过多次)");
+                    break;
+                }
+
+                /* 第一次失败不碰电源: 让模组连着供电把起动/入网走完
+                 * (每次失败就断电 = 模组刚起动到一半被拉闸, 永远起不来) */
+                log_info("[G4] rebuild #%u (no power cycle)\r\n", (unsigned)g_fail_cnt);
+                g4_goto_state(G4_STATE_AT_SYNC);
+            }
+            break;
+    } while (0);
+}
+
 void g4_at_poll(void)
 {
     uint32_t now = get_tick_ms();
@@ -3775,1269 +5214,106 @@ void g4_at_poll(void)
     switch (g_state)
     {
     case G4_STATE_RESET:
-        /* 假死/反复连不上时的最后手段: 拔电重来 */
-        log_info("[G4] power reset (PA8=%s, %s)...\r\n",
-                 g4_pwr_level_text(), g4_pwr_polarity_text());
-        G4_ModulePWR_GPIO_Init();
-        g4_pwr_cycle_and_listen("断电复位");
-        g4_info_clear();
-        g_pdp_retry    = 0u;
-        g_dialup_tried = false;
-        g4_goto_state(G4_STATE_WAIT_MODULE);
+        g4_st_reset(now);
         break;
 
     case G4_STATE_WAIT_MODULE:
-    {
-        /* 【短听 + 主动出击】
-         * 为什么不自己读缓冲: 收包泵已经在后台统计 +MATREADY/RDY 了。这里只查计数,
-         * 好处是泵照常把每一行喂给 URC 层 —— 老版本"WAIT_MODULE 期间不敢扫 URC"
-         * 的限制没有了。
-         * 为什么不等满 30s 自己发 AT: 现场实测这块模组(ML307Y)不会稳定地自己吐
-         * +MATREADY —— 30s 里一个字都没有, 可一发 AT 它就把 +MATREADY 和 OK 一起
-         * 回了。所以只安静听一小会儿捡 banner, 到点就主动敲。 */
-        if (g4_io_ready_total() != g_ready_base)
-        {
-            log_info("[G4] module ready (+MATREADY), 等了 %lus —— 立刻开始握手\r\n",
-                     (unsigned long)((now - g_state_tick) / 1000u));
-            g4_goto_state(G4_STATE_AT_SYNC);
-            break;
-        }
-
-        /* 只要听到过任何字节(哪怕是一行乱码), 就说明供电/接线至少有一项是对的,
-         * 把当前极性记死, 以后不再翻 —— 否则会把一个已经能通的模组反复断电。 */
-        if ((!g_pwr_ok) && (g4_io_rx_total() > 0u))
-        {
-            g_pwr_ok = true;
-            log_info("[G4] == 模组开口说话了 -> 确认供电极性: %s (PA8=%s) ==\r\n",
-                     g4_pwr_polarity_text(), g4_pwr_level_text());
-        }
-
-#if G4_PWR_SEARCH
-        /* 一个字都没听到, 且还没试过相反极性 -> 头号嫌疑: PA8 极性猜反了 */
-        if ((!g_pwr_ok) && (g_pwr_flips < G4_PWR_SEARCH_MAX) &&
-            ((now - g_state_tick) > G4_PWR_SEARCH_MS))
-        {
-            g_pwr_flips++;
-            G4_PowerSwitch_SwapOnHigh();
-            log_info("[G4] !! %us 内一个字节都没听到 -> 怀疑供电极性反了, 翻成 %s 再试\r\n",
-                     (unsigned)(G4_PWR_SEARCH_MS / 1000u), g4_pwr_polarity_text());
-            g4_pwr_cycle_and_listen("极性翻转");
-            break;
-        }
-#endif
-
-        /* 安静听的时间到 -> 主动出击(不再无限等) */
-        if ((now - g_state_tick) > g_boot_wait_ms)
-        {
-            log_info("[G4] 静听 %us 结束(累计收到 %lu 字节) -> 开始主动敲 AT\r\n",
-                     (unsigned)(g_boot_wait_ms / 1000u),
-                     (unsigned long)g4_io_rx_total());
-            g4_goto_state(G4_STATE_AT_SYNC);
-        }
+        g4_st_wait_module(now);
         break;
-    }
 
     case G4_STATE_AT_SYNC:
-    {
-        /* 【主动出击的锤子】每隔 G4_AT_PROBE_MS(500ms) 敲一次 "AT"。
-         * 单次超时就是 G4_AT_PROBE_MS, 所以敲的节奏稳定, 不会被长超时拖成 1Hz;
-         * 每 10 次打一行进度 + 【累计收到】字节数。 */
-        g4_cmd_res_t r = g4_io_cmd_run("AT", "OK", G4_AT_PROBE_MS);
-        if (r == G4_CMD_RUNNING)
-        {
-            break;
-        }
-
-        if (r == G4_CMD_OK)
-        {
-            log_info("AT_SYNC: OK (第 %u 次敲, 从开始敲到应答 %lus)\r\n",
-                     (unsigned)(g_retry_cnt + 1u),
-                     (unsigned long)((now - g_state_tick) / 1000u));
-            g4_goto_state(G4_STATE_ATE0);
-            break;
-        }
-
-        g_retry_cnt++;
-
-        if ((g_retry_cnt % 10u) == 0u)
-        {
-            log_info("[G4] 主动敲 AT %u/%u 次, 累计收到 %lu 字节(PA8=%s)\r\n",
-                     (unsigned)g_retry_cnt, (unsigned)G4_AT_SYNC_RETRY_MAX,
-                     (unsigned long)g4_io_rx_total(), g4_pwr_level_text());
-        }
-
-        if (g_retry_cnt > G4_AT_SYNC_RETRY_MAX)
-        {
-            /* 敲了这么久还不回 —— 按【累计收到】分两种完全不同的故障:
-             *   累计=0 -> 模组一个字节都没发过: 供电/TX-RX 接反/波特率/没起来
-             *   累计>0 -> 它会说话, 是内容或波特率对不上(看上面的 [G4_RX]) */
-            log_info("[G4] !! 敲了 %u 次 AT(%us) 都不回, 累计收到=%lu 字节, PA8=%s\r\n",
-                     (unsigned)(g_retry_cnt - 1u),
-                     (unsigned)(((g_retry_cnt - 1u) * G4_AT_PROBE_MS) / 1000u),
-                     (unsigned long)g4_io_rx_total(), g4_pwr_level_text());
-            if (g4_io_rx_total() == 0u)
-            {
-                log_info("[G4] !! 模组一个字节都没发过 -> 查供电(3.4~4.2V 且不跳)/"
-                         "VCC 处 470uF+10uF+100nF / PC8-PC9 是否接反 / TX 空闲电平\r\n");
-            }
-            else
-            {
-                log_info("[G4] !! 它会说话但听不懂 -> 优先查波特率, 再对比上面的 [G4_RX] 原始行\r\n");
-            }
-            /* 模组已经不理人了: 继续敲 AT 是白费, 直接 4G_RST 断电重启它 */
-            g4_link_recover("模组长时间不应答 AT");
-        }
+        g4_st_at_sync(now);
         break;
-    }
 
     case G4_STATE_ATE0:
-    {
-        /* 子步骤: ATE0 -> ATI -> CGMR -> CFUN? (-> CFUN=1), 每条都是一个非阻塞命令 */
-        g4_cmd_res_t r;
-
-        switch (g_step)
-        {
-        case 0u:
-            /* 关回显只是"锦上添花": 成不成功都往下走, 不在这里耗重试机会。
-             * (ml307_app.c 里写的是 ATE1=开回显 —— 那是给"靠回显做同步"的解析器用的;
-             *  我们按关键字匹配应答, 回显只会把日志刷满, 所以用 ATE0。) */
-            r = g4_io_cmd_run("ATE0", "OK", AT_CMD_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-            if (r != G4_CMD_OK)
-            {
-                log_info("[G4] ATE0 no OK(continue)\r\n");
-            }
-            g_step = 1u;
-            break;
-
-        case 1u:
-            r = g4_io_cmd_run("ATI", "OK", AT_CMD_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-            if ((r == G4_CMD_OK) && (g4_io_cmd_resp()[0] != '\0'))
-            {
-                log_info("[G4] 模组 ATI: %s\r\n", g4_io_cmd_resp());
-            }
-            g_step = 2u;
-            break;
-
-        case 2u:
-            r = g4_io_cmd_run("AT+CGMR", "OK", AT_CMD_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-            if ((r == G4_CMD_OK) && (g4_io_cmd_resp()[0] != '\0'))
-            {
-                log_info("[G4] 固件版本 AT+CGMR: %s\r\n", g4_io_cmd_resp());
-            }
-            g_step = 3u;
-            break;
-
-        case 3u:
-            /* ------------------------------------------------------------------
-             * 【CFUN: 模组的射频功能档位 —— 排"能读卡、能应答、就是不上网"必查】
-             *
-             * 现场现象: AT+CPIN? 回 READY(卡读得到)、ATI/CGSN/CIMI/ICCID 全正常,
-             * 但 AT+CSQ 回 99,99(无信号) 且 AT+CEREG? 回 0,0
-             * —— 注意 0,0 是"没注册【也没有在搜网】", 跟"在搜但搜不到(0,2)"
-             *    完全不同。这个组合除了"没信号/供电塌"之外, 还有一个非常容易被
-             *    忽略的原因: 模组被留在 AT+CFUN=0(最小功能, 射频关着), 这时它
-             *    【根本不会去搜网】, 于是永远 CSQ=99 / CEREG=0,0。
-             *
-             * 谁会把它留在 0: 上一轮实验敲过 AT+CFUN=0、异常掉电、或者模组自己
-             * 因为欠压保护进了最小功能。CFUN 在有些固件里是【掉电保持】的,
-             * 所以"之前能连、现在不能"也可能只是这一档。
-             *
-             * 处理: 读一次 AT+CFUN?, 把值打进日志; 是 0 就发 AT+CFUN=1 打开射频。
-             * 注意用 AT+CFUN=1(不带第二个参数) —— 那是"设为全功能, 不复位";
-             * AT+CFUN=1,1 会复位模组, 这里不要用。
-             * ------------------------------------------------------------------ */
-            r = g4_io_cmd_run("AT+CFUN?", "+CFUN:", AT_CMD_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-
-            if (r == G4_CMD_OK)
-            {
-                int     v[2];
-                uint8_t nv = at_parse_ints(g4_io_cmd_resp(), v, 2u);
-
-                g_cfun = (nv > 0u) ? (int8_t)v[0] : -1;
-
-                if (g_cfun == 0)
-                {
-                    log_info("[G4] !! CFUN=0 —— 模组处于【最小功能/射频关闭】, 它不会去搜网!\r\n");
-                    log_info("[G4] !! 这正好能解释 CSQ=99 + CEREG 0,0(没注册也没在搜); "
-                             "下面发 AT+CFUN=1 把射频打开\r\n");
-                    g_cfun_need_on = true;
-                }
-                else
-                {
-                    log_info("[G4] CFUN=%d (射频正常开启, 1=全功能)\r\n", (int)g_cfun);
-                }
-            }
-            else
-            {
-                log_info("[G4] CFUN 读不到(模组不支持或没应答, continue); "
-                         "若一直连不上, 手工敲: #at AT+CFUN?\r\n");
-                g_cfun = -1;
-            }
-            g_step = 4u;
-            break;
-
-        case 4u:
-            if (!g_cfun_need_on)
-            {
-                g4_goto_state(G4_STATE_MLPMCFG);
-                break;
-            }
-            r = g4_io_cmd_run("AT+CFUN=1", "OK", 5000u);
-            if (r == G4_CMD_RUNNING) { break; }
-
-            if (r == G4_CMD_OK)
-            {
-                log_info("[G4] 已切到 CFUN=1(全功能, 射频开) —— 稍后看 CSQ/CEREG 有没有起来\r\n");
-                g_cfun = 1;
-            }
-            else
-            {
-                log_info("[G4] !! AT+CFUN=1 没回 OK —— 手工敲 #at AT+CFUN=1 再看\r\n");
-            }
-            g_cfun_need_on = false;
-            g4_goto_state(G4_STATE_MLPMCFG);
-            break;
-
-        default:
-            g4_goto_state(G4_STATE_MLPMCFG);
-            break;
-        }
+        g4_st_ate0(now);
         break;
-    }
 
     case G4_STATE_MLPMCFG:
-    {
-        /* 关掉模组默认打开的深睡眠(ml307_app.c: AT+MLPMCFG="sleepmode",0,1)。
-         * 深睡眠下模组会周期性不应答 AT, 表现就是"时不时收不到云端下行"。
-         * 失败不影响联网, 继续往下。 */
-        g4_cmd_res_t r = g4_io_cmd_run("AT+MLPMCFG=\"sleepmode\",0,1", "OK",
-                                       AT_CMD_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-        if (r != G4_CMD_OK)
-        {
-            log_info("[G4] MLPMCFG no OK(continue)\r\n");
-        }
-        g4_goto_state(G4_STATE_CPIN);
+        g4_st_mlpmcfg(now);
         break;
-    }
 
     case G4_STATE_CPIN:
-    {
-        /* SIM 是否就绪只查一次; 不 READY 也照常往下试 —— 后面注册超时会走恢复流程 */
-        g4_cmd_res_t r = g4_io_cmd_run("AT+CPIN?", "+CPIN:", AT_CMD_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-
-        if (r == G4_CMD_OK)
-        {
-            const char *resp = g4_io_cmd_resp();
-
-            if (strstr(resp, "READY") != NULL)
-            {
-                log_info("[G4] SIM ready\r\n");
-            }
-            else
-            {
-                /* 没插卡/需要 PIN 时注册必然失败, 但还是走完整条流程看日志 */
-                log_info("[G4] SIM not READY: %s\r\n", resp);
-            }
-        }
-        else
-        {
-            log_info("[G4] CPIN no resp(continue)\r\n");
-        }
-        g4_goto_state(G4_STATE_CGSN);
+        g4_st_cpin(now);
         break;
-    }
 
     case G4_STATE_CGSN:
-    {
-        /* AT+CGSN=1 读 IMEI: 应答 "+CGSN: <imei>" */
-        g4_cmd_res_t r = g4_io_cmd_run("AT+CGSN=1", "+CGSN:", AT_CMD_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-
-        if ((r == G4_CMD_OK) &&
-            (at_take_digits(g4_io_cmd_resp(), g_info.imei, G4_IMEI_LEN) >= 14u))
-        {
-            log_info("[G4] IMEI=%s\r\n", g_info.imei);
-        }
-        else
-        {
-            g_info.imei[0] = '\0';
-            /* ★2026-10-08: clientID 已不再默认用 IMEI(现在固定 "110001")★,
-             * 所以这里只说"IMEI 读不到"(它仍然影响: 诊断日志、以及 clientId 配成
-             * 特殊值 "IMEI" 时的取值)。 */
-            log_info("[G4] IMEI 读不到(不影响 clientID=%s)\r\n", g_client_id);
-        }
-        g4_goto_state(G4_STATE_CIMI);
+        g4_st_cgsn(now);
         break;
-    }
 
     case G4_STATE_CIMI:
-    {
-        /* AT+CIMI 的应答【就是 IMSI 本身】: 一行 15 位数字 —— 关键字只能用来
-         * 判定"收完了", 所以用 "OK", 真正的 IMSI 从累积应答里取第一段数字。 */
-        g4_cmd_res_t r = g4_io_cmd_run("AT+CIMI", "OK", AT_CMD_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-
-        if ((r == G4_CMD_OK) &&
-            (at_take_digits(g4_io_cmd_resp(), g_info.imsi, G4_IMSI_LEN) >= 14u))
-        {
-            log_info("[G4] IMSI=%s\r\n", g_info.imsi);
-        }
-        else
-        {
-            g_info.imsi[0] = '\0';
-            log_info("[G4] IMSI none\r\n");
-        }
-        g4_goto_state(G4_STATE_ICCID);
+        g4_st_cimi(now);
         break;
-    }
 
     case G4_STATE_ICCID:
-    {
-        /* ML307R 是 AT*ICCID?, 个别固件是 AT+ICCID?, 两个都试一次, 都不行就算了 */
-        g4_cmd_res_t r;
-
-        if (g_step == 0u)
-        {
-            r = g4_io_cmd_run("AT*ICCID?", "ICCID", AT_CMD_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-
-            if ((r == G4_CMD_OK) &&
-                (at_take_digits(g4_io_cmd_resp(), g_info.iccid, G4_ICCID_LEN) >= 18u))
-            {
-                log_info("[G4] ICCID=%s\r\n", g_info.iccid);
-                g4_goto_state(G4_STATE_CSQ);
-                break;
-            }
-            g_step = 1u;            /* 换第二条命令再试 */
-            break;
-        }
-
-        r = g4_io_cmd_run("AT+ICCID?", "ICCID", AT_CMD_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-
-        if ((r == G4_CMD_OK) &&
-            (at_take_digits(g4_io_cmd_resp(), g_info.iccid, G4_ICCID_LEN) >= 18u))
-        {
-            log_info("[G4] ICCID=%s\r\n", g_info.iccid);
-        }
-        else
-        {
-            g_info.iccid[0] = '\0';
-            log_info("[G4] ICCID none\r\n");
-        }
-        g4_goto_state(G4_STATE_CSQ);
+        g4_st_iccid(now);
         break;
-    }
 
     case G4_STATE_CSQ:
-    {
-        /* AT+CSQ → "+CSQ: <rssi>,<ber>"; rssi 99 = 无信号/未知 */
-        g4_cmd_res_t r = g4_io_cmd_run("AT+CSQ", "+CSQ:", AT_CMD_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-
-        if (r == G4_CMD_OK)
-        {
-            char num[8];
-
-            if (at_take_digits(g4_io_cmd_resp(), num, (uint8_t)sizeof(num)) > 0u)
-            {
-                uint8_t csq = (uint8_t)atoi(num);
-
-                if ((csq > 31u) || (csq == 99u))
-                {
-                    g_info.csq      = 99u;
-                    g_info.rssi_dbm = 0;
-                    log_info("[G4] CSQ=99 (no signal)\r\n");
-                }
-                else
-                {
-                    g_info.csq      = csq;
-                    g_info.rssi_dbm = (int16_t)(-113 + 2 * (int)csq);
-                    log_info("[G4] CSQ=%u (%d dBm)\r\n",
-                             (unsigned)g_info.csq, (int)g_info.rssi_dbm);
-                }
-            }
-        }
-        else
-        {
-            log_info("[G4] CSQ none\r\n");
-        }
-
-        /* AT+QENG="servingcell" 读 RSRP —— CSQ=99 不可靠(99 既可能真无信号,
-         * 也可能模组还没测到/射频被 AT+CFUN=0 关着), RSRP 是 LTE 参考信号接收功率,
-         * 比 CSQ 更能定位"到底是没信号还是模组没在测"。命令不支持/没注册也没关系,
-         * 只打日志不拦建链(同 CSQ 做法)。响应格式因模组而异, 原样打进日志,
-         * 现场 RSRP/RSRQ/RSSI 数值直接看原文(通常在 LTE 模式响应的倒数第 3~4 字段)。 */
-        {
-            char qeng[160];
-            if (g4_io_send_expect_resp("AT+QENG=\"servingcell\"", "+QENG:",
-                                       AT_CMD_TIMEOUT_MS, NULL,
-                                       qeng, (uint16_t)sizeof(qeng)))
-            {
-                log_info("[G4] QENG servingcell: %s\r\n", qeng);
-            }
-            else
-            {
-                log_info("[G4] QENG servingcell none (未注册或模组不支持)\r\n");
-            }
-        }
-
-        /* 顺手读一次模组自测供电(AT+MCHIPINFO="vbat", 兜底 AT+CBC)和模组温度:
-         * 现场"供电稳不稳、模组是不是过热重启"看这两行就够。命令不支持也没关系,
-         * g4_read_vbat()/g4_read_temp() 自己会打日志然后返回, 不影响建链。
-         * (这两个是阻塞封装, 但内部跑的是同一个收包泵, 所以不会丢接收。) */
-        (void)g4_read_vbat();
-        g4_read_temp();
-
-        /* 【回到"等注册"这条主路 —— 拨号(MDIALUP)被证明是帮倒忙, 已撤下】
-         * 现场日志的铁证: 执行 AT+MDIALUP=1,1 之后, 模组的 AT 引擎就乱了 ——
-         * 之后每条命令只回 "+MATREADY" + "OK", 连 +CEREG: 都不给。
-         * 现场那份成功率很高的 ml307_app.c 从头到尾没调过 MDIALUP, 走的就是
-         * 标准 3GPP: CREG 等注册 → CGDCONT → CGACT → CGPADDR。 */
-        g4_goto_state(G4_STATE_CREG);
+        g4_st_csq(now);
         break;
-    }
 
     case G4_STATE_CREG:
-    {
-        const char  *cmd;
-        const char  *tag;
-        uint8_t      stat = 0xFFu;
-        g4_cmd_res_t r;
-
-        /* ---- 注册被拒(stat==3)之后的恢复: 发 CFUN 软复位 -> 等 10s -> 回 AT_SYNC ----
-         * 【为什么不用 delay_ms(10000)】: 那 10 秒里没人收 USART2, 云端下行会把
-         * 环形缓冲顶爆 —— 正是"一下发就出事"的成因之一。现在只是"这一拍什么都不做"。 */
-        if (g_step >= 2u)
-        {
-            if (g_step == 2u)
-            {
-                r = g4_io_cmd_run("AT+CFUN=1,1", "OK", 8000u);
-                if (r == G4_CMD_RUNNING) { break; }
-                g_step      = 3u;
-                g_wait_tick = now;
-                break;
-            }
-            if ((uint32_t)(now - g_wait_tick) >= 10000u)
-            {
-                g4_goto_state(G4_STATE_AT_SYNC);
-            }
-            break;
-        }
-
-        /* 【限速】没到下一次查询时间就什么都不发(进入本状态时 g_retry_cnt=0,
-         * 所以第一条注册查询立刻发; 之后每 AT_CEREG_POLL_MS 一条)。
-         * ⚠️ 只有 g_step==0(没有在途命令)时才允许被限速挡住, 否则会把自己
-         *    在途的那条命令也一起"限"住, 永远收不到应答。 */
-        if ((g_step == 0u) && (g_retry_cnt != 0u) &&
-            ((now - g_state_tick) < AT_CEREG_POLL_MS))
-        {
-            break;
-        }
-
-        if (g_step == 0u)
-        {
-            g_state_tick = now;     /* 记住这次查询时刻, 管住下一次 */
-            g_retry_cnt++;
-            g_step = 1u;
-        }
-
-        cmd = reg_query_cmd(g_reg_probe);
-        tag = reg_query_tag(g_reg_probe);
-
-        r = g4_io_cmd_run(cmd, tag, AT_CMD_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-        g_step = 0u;                /* 这一拍结束, 下一拍按限速再发 */
-
-        if (r == G4_CMD_OK)
-        {
-            stat              = at_reg_stat(g4_io_cmd_resp(), tag);
-            g_info.reg_status = stat;
-
-            /* 1=已注册(本地) 5=已注册(漫游) */
-            if ((stat == 1u) || (stat == 5u))
-            {
-                log_info("[G4] registered (%s stat=%u)\r\n", cmd, (unsigned)stat);
-                g_pdp_retry    = 0u;
-                g_dialup_tried = false;
-                apn_build_candidates();   /* 注册上了 -> 按 IMSI 定第一个 APN 候选 */
-                g4_goto_state(G4_STATE_CGDCONT);
-                break;
-            }
-            /* 0=没注册也没在搜 / 2=没注册但在搜 / 3=被拒 —— 前两种都是"再等等" */
-        }
-        else if (r == G4_CMD_ERR)
-        {
-            /* 模组【明确回 ERROR】才当不支持这条命令 -> 换另一种注册域 */
-            log_info("[G4] %s 不支持(模组回了 ERROR) -> 换下一种\r\n", cmd);
-            g_reg_probe++;
-            if (g_reg_probe > 2u)
-            {
-                g_reg_probe = 0u;
-            }
-        }
-        else
-        {
-            /* 【一句应答都没有 ≠ 不支持 —— 这是之前踩过的误判】
-             * 现场实测: 发 AT+CEREG? 回来的却是 "+MATREADY"(模组刚重启), 于是这条
-             * 命令"没有应答", 老代码直接判成不支持就把查询方式换掉了。
-             * 现在: 没应答只当"这一拍没问到", 【保持同一种查询方式】按节奏重试。 */
-            log_info("[G4] %s 无应答(模组可能正在起动/重新入网, 不是不支持) -> 稍后重试\r\n",
-                     cmd);
-        }
-
-        if (g_retry_cnt >= AT_CEREG_POLL_MAX)
-        {
-            /* 【注册查询超时 ≠ 不能上网 —— 不再发 CFUN=1,1 去软复位模组】
-             * 原来这里是 CFUN + 等 10s + 从头握手: 那等于把模组刚攒起来的入网进度
-             * 又清掉一次。而且 3GPP 里"注册不上"不等于"PDP 起不来" —— 有些网络/卡
-             * 就是 CEREG 报得慢, 但 CGDCONT/CGACT 照样能激活并分到 IP。
-             * 所以现在: 报清楚, 然后【照常往下走】去 CGDCONT/CGACT/CGPADDR 试,
-             * 拿不拿到 IP 才是唯一判据 —— 这正是 ml307_app.c 的做法。 */
-            log_info("[G4] 注册查询超时 %us(最后 stat=%u '%s') -> 不再复位模组, "
-                     "继续去激活 PDP 试\r\n",
-                     (unsigned)((AT_CEREG_POLL_MAX * AT_CEREG_POLL_MS) / 1000u),
-                     (unsigned)stat, g4_reg_stat_text(stat));
-            log_info("[G4] (提示: 注册状态难看时, 先看 VBAT 和 CSQ —— "
-                     "欠压/无信号才是常见原因)\r\n");
-            g4_goto_state(G4_STATE_CGDCONT);
-            break;
-        }
-
-        if ((g_retry_cnt % 5U) == 0U)
-        {
-            /* 每 5 次(10s)报一次进度就够了, 免得日志被"还没注册"刷屏。
-             * 【顺便刷新一次模组自测供电】: 注册阶段正是模组"使劲搜网/发射"的时候,
-             * 供电最容易塌 —— 现场就是靠这一行看到 VBAT 掉到 2.5V 的。 */
-            log_info("[G4] wait reg %us(stat=%u CSQ=%u VBAT=%umV)...\r\n",
-                     (unsigned)((g_retry_cnt * AT_CEREG_POLL_MS) / 1000u),
-                     (unsigned)stat, (unsigned)g_info.csq, (unsigned)g_info.vbat_mv);
-            (void)g4_read_vbat();       /* 读一次并更新状态行/上面的值 */
-        }
-
-        /* 【注册被拒 = stat 3】: 网络明确说"不让你注册", 和"还在搜"完全不同。
-         * 但先看供电 —— 模组在欠压时也会报 3(它压根没力气把入网流程走完)。 */
-        if (stat == 3u)
-        {
-            log_info("[G4] !! 注册被【拒绝】(stat=3) —— 不是没信号, 是网络不接受\r\n");
-            log_info("[G4] !! 先看供电: 模组自测 VBAT=%umV (正常要 3400mV 以上)——"
-                     "欠压时模组会一直重来, 表现就包括 stat=3\r\n",
-                     (unsigned)g_info.vbat_mv);
-            log_info("[G4] !! 供电正常再查: SIM 是否欠费/停机 / 该卡是否被限了 4G 权限 / "
-                     "模组是否只认某个网络制式\r\n");
-            g_step = 2u;        /* 下一拍开始: CFUN 软复位 -> 等 10s -> 回 AT_SYNC */
-        }
+        g4_st_creg(now);
         break;
-    }
 
     case G4_STATE_CGDCONT:
-    {
-        /* 设 APN(ml307_app.c: AT+CGDCONT=1,"IP","CMNET")。失败(比如已经设过)
-         * 不影响后续, 继续去激活 PDP。 */
-        g4_cmd_res_t r;
-
-        if (g_step == 0u)
-        {
-            /* 【先清旧 PDP 上下文, 再设 APN】
-             * MQTT/TCP 异常断开、或者上一轮换 APN 试错之后, 同一个 CID 的 PDP
-             * 上下文常常留着"脏"状态。直接再 CGDCONT/CGACT 会偶发激活失败, 严重时
-             * 射频侧卡住 —— 表现就是 AT 还能应答、但 CSQ=99 搜不到网。
-             * AT+CGACT=0,1 是标准 3GPP 的"去激活 CID 1", 先放一条把上下文放掉。
-             * 本来就没激活时它可能回 ERROR 或没 OK, 都【不影响流程】, 只看日志。 */
-            r = g4_io_cmd_run("AT+CGACT=0,1", "OK", AT_PDP_DEACT_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-
-            if (r == G4_CMD_OK)
-            {
-                log_info("[G4] 旧 PDP 上下文已去激活(CGACT=0,%u)\r\n",
-                         (unsigned)G4_PDP_CID);
-            }
-            else
-            {
-                log_info("[G4] CGACT=0,%u 无 OK(本来没激活时正常), 继续\r\n",
-                         (unsigned)G4_PDP_CID);
-            }
-            g_step = 1u;
-            break;
-        }
-
-        if (g_step == 1u)
-        {
-            const char *apn = g_apn_list[g_apn_idx];
-
-            snprintf(g_tx_cmd, sizeof(g_tx_cmd), "AT+CGDCONT=%u,\"IP\",\"%s\"",
-                     (unsigned)G4_PDP_CID, apn);
-            g_step = 2u;
-        }
-
-        r = g4_io_cmd_run(g_tx_cmd, "OK", AT_CMD_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-
-        if (r == G4_CMD_OK)
-        {
-            log_info("[G4] APN %u/3: %s\r\n",
-                     (unsigned)(g_apn_idx + 1u), g_apn_list[g_apn_idx]);
-        }
-        else
-        {
-            log_info("[G4] APN no OK(continue)\r\n");
-        }
-        g4_goto_state(G4_STATE_CGACT);
+        g4_st_cgdcont(now);
         break;
-    }
 
     case G4_STATE_CGACT:
-    {
-        /* 激活 PDP: 首次入网可能要十几秒, 给 15s(和 ml307_app.c 一致) */
-        g4_cmd_res_t r;
-
-        if (g_step == 0u)
-        {
-            snprintf(g_tx_cmd, sizeof(g_tx_cmd), "AT+CGACT=1,%u", (unsigned)G4_PDP_CID);
-            g_step = 1u;
-        }
-
-        r = g4_io_cmd_run(g_tx_cmd, "OK", AT_PDP_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-
-        if (r == G4_CMD_OK)
-        {
-            log_info("[G4] PDP activated\r\n");
-        }
-        else
-        {
-            log_info("[G4] %s no OK, check IP\r\n", g_tx_cmd);
-        }
-        g4_goto_state(G4_STATE_CGPADDR);
+        g4_st_cgact(now);
         break;
-    }
 
     case G4_STATE_CGPADDR:
-    {
-        /* 【拿 IP 才是真的通了】: CGACT 回 OK 只说明命令被接受, PDP 是否真起来
-         * 要看 CGPADDR(ml307_app.c 里也是用空 IP 判 PDP 失败)。 */
-        g4_cmd_res_t r;
-
-        /* 换 APN 之前等 1s(原来是 delay_ms(1000), 现在只算时间戳, 不阻塞) */
-        if (g_step == 5u)
-        {
-            if ((uint32_t)(now - g_wait_tick) >= 1000u)
-            {
-                g4_goto_state(G4_STATE_CGDCONT);
-            }
-            break;
-        }
-
-        if (g_step == 0u)
-        {
-            snprintf(g_tx_cmd, sizeof(g_tx_cmd), "AT+CGPADDR=%u", (unsigned)G4_PDP_CID);
-            g_step = 1u;
-        }
-
-        r = g4_io_cmd_run(g_tx_cmd, "+CGPADDR:", AT_CMD_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-        g_step = 0u;
-
-        if ((r == G4_CMD_OK) &&
-            at_take_ipv4(g4_io_cmd_resp(), g_info.ip, G4_IP_LEN))
-        {
-            g_info.pdp_ok = true;
-            log_info("[G4] PDP got IP: %s\r\n", g_info.ip);
-            g4_goto_state(G4_STATE_AFTER_IP);
-            break;
-        }
-
-        g_pdp_retry++;
-        if (g_pdp_retry < G4_PDP_ADDR_RETRY_MAX)
-        {
-            /* 拿不到 IP 最常见的原因就是 APN 不对(尤其换运营商的卡):
-             * 换下一家的 APN, 重新 CGDCONT -> CGACT -> CGPADDR 走一遍 */
-            g_apn_idx = (uint8_t)((g_apn_idx + 1u) % 3u);
-            log_info("[G4] no IP -> 换 APN %s\r\n", g_apn_list[g_apn_idx]);
-            g_step      = 5u;           /* 先等 1s 再回 CGDCONT */
-            g_wait_tick = now;
-            break;
-        }
-
-        /* 【注意】拨号在开局就已经试过了, 走到这里说明两条路都没拿到 IP ——
-         * 再回去拨一次没有意义, 直接进 ERROR 走恢复流程。 */
-        log_info("[G4] no IP(拨号与 PDP 都失败) -> rebuild\r\n");
-        g4_goto_state(G4_STATE_ERROR);
+        g4_st_cgpaddr(now);
         break;
-    }
 
     case G4_STATE_DIALUP:
-    {
-        /* 【说明】现场最终走的是"标准 3GPP: CEREG -> CGDCONT -> CGACT -> CGPADDR"
-         * 这条主路(见 G4_STATE_AFTER_IP), G4_STATE_DIALUP 目前【没有任何地方会
-         * 切进来】—— 保留它只是为了台架手工核对 AT+MDIALUP 的行为(日志口 #dial)。
-         * 这里同样改成非阻塞子步骤, 免得哪天有人把它接回主路时又带进 delay_ms。 */
-        g4_cmd_res_t r;
-
-        if (g_step == 3u)       /* 拨号之后等 3s 再查结果 */
-        {
-            if ((uint32_t)(now - g_wait_tick) >= 3000u)
-            {
-                g_step = 4u;
-            }
-            break;
-        }
-
-        if (g_step == 0u)
-        {
-            r = g4_io_cmd_run("AT+MDIALUP?", "+MDIALUP:", AT_CMD_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-
-            if ((r == G4_CMD_OK) &&
-                at_take_v4_quoted(g4_io_cmd_resp(), g_info.ip, G4_IP_LEN))
-            {
-                g_info.pdp_ok = true;
-                log_info("[G4] 拨号已在连接状态(AT+MDIALUP?), IP=%s\r\n", g_info.ip);
-                g4_goto_state(G4_STATE_REG_CHECK);
-                break;
-            }
-            g_step = 1u;
-            break;
-        }
-
-        if (g_step == 1u)
-        {
-            r = g4_io_cmd_run("AT+MDIALUP=1,1", "OK", AT_DIALUP_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-
-            if (r == G4_CMD_OK)
-            {
-                log_info("[G4] AT+MDIALUP=1,1 已下发, 等拨号结果...\r\n");
-            }
-            else
-            {
-                log_info("[G4] AT+MDIALUP=1,1 没回 OK(第 %u 次)\r\n",
-                         (unsigned)(g_retry_cnt + 1u));
-            }
-            g_step      = 3u;       /* 给它 3s 让 URC 回来 */
-            g_wait_tick = now;
-            break;
-        }
-
-        /* g_step == 4: 再查一次拨号状态 */
-        r = g4_io_cmd_run("AT+MDIALUP?", "+MDIALUP:", AT_CMD_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-        g_step = 0u;
-
-        if ((r == G4_CMD_OK) &&
-            at_take_v4_quoted(g4_io_cmd_resp(), g_info.ip, G4_IP_LEN))
-        {
-            g_info.pdp_ok = true;
-            log_info("[G4] 拨号成功: IP=%s (第 %u 次)\r\n",
-                     g_info.ip, (unsigned)(g_retry_cnt + 1u));
-            g4_goto_state(G4_STATE_REG_CHECK);
-            break;
-        }
-
-        g_retry_cnt++;
-        if (g_retry_cnt <= G4_DIALUP_RETRY_MAX)
-        {
-            log_info("[G4] 拨号没拿到 IP(第 %u/%u 次), 下一轮再试\r\n",
-                     (unsigned)g_retry_cnt, (unsigned)G4_DIALUP_RETRY_MAX);
-            g_step      = 3u;
-            g_wait_tick = now;      /* 也等 2~3s, 不阻塞主循环 */
-            break;
-        }
-
-        log_info("[G4] !! 拨号 %u 次都没拿到 IP -> 退回老流程(CEREG/CGDCONT/CGACT/CGPADDR)\r\n",
-                 (unsigned)G4_DIALUP_RETRY_MAX);
-        log_info("[G4] !! 提示: 拨号失败多半还是网络侧(注册被拒/无信号/SIM 状态), "
-                 "先看下面 CEREG 的 stat 和 VBAT\r\n");
-        g4_goto_state(G4_STATE_CREG);
+        g4_st_dialup(now);
         break;
-    }
 
     case G4_STATE_REG_CHECK:
-    {
-        /* 【拨号之后的诊断检查 —— 只查、只打印, 不当闸门】
-         * 拨号已经把 IP 拿到手了, 所以无论 stat 是什么都继续往下走(去连 MQTT)。 */
-        g4_cmd_res_t r;
-
-        if (g_step == 0u)
-        {
-            r = g4_io_cmd_run("AT+CEREG?", "+CEREG:", AT_CMD_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-
-            if (r == G4_CMD_OK)
-            {
-                g_info.reg_status = at_reg_stat(g4_io_cmd_resp(), "+CEREG:");
-                log_info("[G4] GSM/PS 注册状态 AT+CEREG? stat=%u (%s) | CSQ=%u IP=%s VBAT=%umV\r\n",
-                         (unsigned)g_info.reg_status,
-                         g4_reg_stat_text(g_info.reg_status),
-                         (unsigned)g_info.csq,
-                         (g_info.ip[0] != '\0') ? g_info.ip : "-",
-                         (unsigned)g_info.vbat_mv);
-                g_step = 2u;
-                break;
-            }
-            g_step = 1u;
-            break;
-        }
-
-        if (g_step == 1u)
-        {
-            r = g4_io_cmd_run("AT+CGREG?", "+CGREG:", AT_CMD_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-
-            if (r == G4_CMD_OK)
-            {
-                g_info.reg_status = at_reg_stat(g4_io_cmd_resp(), "+CGREG:");
-            }
-            log_info("[G4] GSM/PS 注册状态 AT+CGREG? stat=%u (%s) | CSQ=%u IP=%s VBAT=%umV\r\n",
-                     (unsigned)g_info.reg_status,
-                     g4_reg_stat_text(g_info.reg_status),
-                     (unsigned)g_info.csq,
-                     (g_info.ip[0] != '\0') ? g_info.ip : "-",
-                     (unsigned)g_info.vbat_mv);
-            g_step = 2u;
-            break;
-        }
-
-        (void)g4_read_vbat();       /* 顺手刷新供电, 低压会自己告警 */
-        g4_goto_state(G4_STATE_AFTER_IP);
+        g4_st_reg_check(now);
         break;
-    }
 
     case G4_STATE_MQTT_DISC:
-    {
-        /* 清理残留连接, 无论成败继续。
-         * 关键字传 NULL: 引擎只等 G4_MQTT_DISC_WAIT_MS 让模组消化一下,
-         * 到点返回 TIMEOUT, 正是我们要的"等一会儿就往下走"。 */
-        g4_cmd_res_t r = g4_io_cmd_run_silent("AT+MQTTDISC=" G4_MQTT_CONNECT_ID,
-                                              G4_MQTT_DISC_WAIT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-        /* 【先配模组参数, 再建连接】: 手册要求 MQTTCFG 系列在"MQTT 连接未创建"时
-         * 下发 —— 此刻刚 DISC 完, 正是这个条件。 */
-        g4_goto_state(G4_STATE_MQTT_CFG);
+        g4_st_mqtt_disc(now);
         break;
-    }
 
     case G4_STATE_MQTT_CFG:
-    {
-        /* ---- 把【模组自己的能力】配好(2026-10-04 第 2 步) ----
-         * 遗嘱 / keepalive / pingreq / pingresp / reconn 一条条下发。
-         * 【每轮建链都重下发】手册明确"模组掉电后配置参数不保存"。
-         * 【任何一条失败都只记日志并继续】—— 这是"让模组干得更专业", 不是建链前提;
-         * 绝不能因为它连不上 broker。 */
-        static char cfg_cmd[256];
-        g4_cmd_res_t r;
-
-        if (g_step < (uint8_t)G4_MQTT_CFG_STEPS)
-        {
-            if (!mqtt_cfg_build((uint8_t)g_step, cfg_cmd, (uint16_t)sizeof(cfg_cmd)))
-            {
-                g_step++;           /* 这一步不需要发(例如没配遗嘱) -> 跳过 */
-                break;
-            }
-
-            r = g4_io_cmd_run(cfg_cmd, "OK", AT_CMD_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-
-            if (r == G4_CMD_OK)
-            {
-                log_info("[4G] 模组参数已接受: %s\r\n", cfg_cmd);
-            }
-            else
-            {
-                log_info("[4G] !! 模组参数未接受(res=%d): %s —— 跳过, 不影响建链\r\n",
-                         (int)r, cfg_cmd);
-            }
-            g_step++;
-            break;
-        }
-
-        g4_goto_state(G4_STATE_MQTT_CONN);
+        g4_st_mqtt_cfg(now);
         break;
-    }
 
     case G4_STATE_MQTT_CONN:
-    {
-        g4_cmd_res_t r;
-
-        if (g_step == 0u)
-        {
-            g4_urc_reset_conn_state();   /* 清掉上一次的 conn 结果, 便于失败时看原因 */
-            /* 【记下"发这条 MQTTCONN 之前"的 conn URC 序号】: 之后 WAIT_CONN 只认
-             * 序号变新了的那条 conn 结果 —— 时序上必须在这里取基准(不是在收到 OK
-             * 之后), 否则"命令在途时到达的 conn URC"会被我们当成旧的而漏掉。 */
-            s_conn_seq_base = g4_urc_conn_seq();
-            if (!mqtt_build_conn_cmd(g_tx_cmd, sizeof(g_tx_cmd)))
-            {
-                log_info("[G4] MQTTCONN 命令组装失败 -> rebuild\r\n");
-                g4_goto_state(G4_STATE_ERROR);
-                break;
-            }
-            g_step = 1u;
-        }
-
-        r = g4_io_cmd_run(g_tx_cmd, "OK", AT_CONN_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-
-        if (r == G4_CMD_OK)
-        {
-            g4_goto_state(G4_STATE_WAIT_CONN);
-            break;
-        }
-
-        if (++g_retry_cnt > 3U)
-        {
-            log_info("[G4] MQTTCONN rejected -> rebuild\r\n");
-            g4_goto_state(G4_STATE_ERROR);
-        }
-        else
-        {
-            g_step = 0u;                /* 下一拍重新组装再试 */
-        }
+        g4_st_mqtt_conn(now);
         break;
-    }
 
     case G4_STATE_WAIT_CONN:
-        /* conn URC 由收包泵->g4_urc 维护在线状态, 这里只查结果。
-         * ⚠️ 必须【同时】要求"本次 MQTTCONN 之后新到了一条 conn URC"(序号变了)。
-         *    只看 g4_urc_is_online() 会被上一轮的在线标志骗过去 —— 现场日志 78.txt
-         *    就是这么白烧 30~40 秒的:
-         *        [G4] MQTT conn ok (res=255 unknown)   ← 255 = 本次一条 conn URC 都没收到
-         *        [G4] -> MQTT_SUB
-         *        +CME ERROR: 607 ×4  ->  MQTTSUB fail -> rebuild
-         */
-        if ((g4_urc_conn_seq() != s_conn_seq_base) && g4_urc_is_online())
-        {
-            log_info("[G4] MQTT conn ok (res=%u %s)\r\n",
-                     (unsigned)g4_urc_get_conn_state(),
-                     g4_conn_state_text(g4_urc_get_conn_state()));
-            g4_goto_state(G4_STATE_MQTT_SUB);
-        }
-        else if ((now - g_state_tick) >
-                 (g_mqtt_fast_active ? AT_URC_TIMEOUT_FAST_MS : AT_URC_TIMEOUT_MS))
-        {
-            uint8_t st = g4_urc_get_conn_state();
-
-            /* ★★2026-10-08: 快修路径拿不到 conn URC ⇒ 【立刻断电】, 不再白等★★
-             *
-             * 【现场现象】模组欠压重启后, MQTTCONN 回 OK 但一条 conn URC 都没有
-             *   (既不报连上也不报失败)。这是"模组 MQTT 栈已坏"的特征 ——
-             *   轻量的 DISC/CFG/CONN/SUB 重建【救不回来】, 只有整颗模组断电重启才行。
-             *   实测: 最后就是靠 4G_RST 断电才重连成功的。
-             *
-             * 【为什么不再走 G4_STATE_ERROR】那条路会重试, 而重试用的是同一个坏栈,
-             *   结果是"60 秒 x 最多 3 次 = 3 分钟"的纯白等。既然已经能判定
-             *   "模组栈坏了", 就直接跳到唯一有效的处置 —— 断电重置。
-             *
-             * 【代价可控】断电恢复要 40~60 秒, 但【一定成功】; 白等 3 分钟然后
-             *   照样断电, 是纯亏。 */
-            if (g_mqtt_fast_active)
-            {
-                log_info("[G4] !! 快修在 WAIT_CONN 等了 %us 都没有 conn URC(last=%u/%s)"
-                         " —— 模组 MQTT 栈已坏, 轻量重建救不回来, 【直接断电重置模组】\r\n",
-                         (unsigned)(AT_URC_TIMEOUT_FAST_MS / 1000u),
-                         (unsigned)st, g4_conn_state_text(st));
-                g_mqtt_fast_cnt    = 0u;
-                g_mqtt_suspect     = false;
-                g_mqtt_fast_active = false;
-                g4_link_recover("快修在 WAIT_CONN 拿不到 conn URC(模组 MQTT 栈已坏)");
-                break;
-            }
-
-            log_info("[G4] conn URC timeout, last=%u(%s)\r\n",
-                     (unsigned)st, g4_conn_state_text(st));
-            g4_goto_state(G4_STATE_ERROR);
-        }
+        g4_st_wait_conn(now);
         break;
 
     case G4_STATE_MQTT_SUB:
-    {
-        /* 订阅 topic 是运行期可变的(见 g4_at_set_sub_topic), 所以这里拼一次命令。
-         * 用静态缓冲: g4_io_cmd_run() 在调用期间会用到这个指针。
-         * ★2026-10-08: 没有编译期兜底主题了 —— 空 = main.c 没注入, 明确报错并跳过。 */
-        static char   subcmd[G4_SUB_TOPIC_MAX + 48];
-        g4_cmd_res_t  r;
-
-        if (g_sub_topic[0] == '\0')
-        {
-            log_info("[G4] !! 下行订阅 topic 为空 —— main.c 没有注入(应为本机 rt/gw/{gwId}/cmd)"
-                     ", 【跳过订阅】: 上行仍可发, 但收不到任何云端命令\r\n");
-            g4_urc_set_online();
-            g4_pub_mark_ok();
-            g4_goto_state(G4_STATE_REG_ARM);
-            break;
-        }
-
-        (void)snprintf(subcmd, sizeof(subcmd), "AT+MQTTSUB=%s,\"%s\",%s",
-                       G4_MQTT_CONNECT_ID, g_sub_topic, G4_MQTT_SUB_QOS);
-
-        r = g4_io_cmd_run(subcmd, "OK", AT_CMD_TIMEOUT_MS);
-        if (r == G4_CMD_RUNNING) { break; }
-
-        if (r == G4_CMD_OK)
-        {
-            g4_urc_set_online();
-            local_alarm_clear(ALARM_4G_OFFLINE);
-            g_fail_cnt = 0u;        /* 真的连上了: 失败预算清零 */
-            g_pub_prompt_loss = 0u; /* 新链路: 连续丢 '>' 的计数也清零 */
-            g_mqtt_fast_cnt   = 0u; /* 回来了: MQTT 快修连败计数清零 */
-            /* ★2026-10-08: 快修标记也在这里清 —— 订阅成功才算"快修真的救回来了"。
-             * 放在这里而不是 DISCONN/ONLINE: 万一后来 SUB 失败又走了别的恢复路径,
-             * 标记留着不会有害(下次冷启动建链时会重新走 WAIT_CONN 的 60 秒分支吗?
-             * 不会 —— 见下面 g4_at_init 里的清零), 但清了更干净。 */
-            g_mqtt_fast_active = false;
-            g_pub_noack_cnt   = 0u;
-            g_mqtt_suspect    = false;
-            log_info("===== MQTT ONLINE! =====\r\n");
-            /* 保活计时从"上线"这一刻起算, 免得把建链花掉的时间算进停滞窗口 */
-            g4_pub_mark_ok();
-            /* ★2026-10-08: 这里原来还打了 pub=mod/mod_upload —— 那条通道已删除。
-             * 现在打三个真正生效的值: clientID / user / sub(下行主题)。
-             * clientID 必须打【实际发出去的那个】—— 配成特殊值 "IMEI" 时它不是 g_client_id,
-             * 所以这里按 mqtt_build_conn_cmd 的同一套规则算一遍(否则日志会骗人)。 */
-            log_info("[G4] clientID=%s user=%s sub=%s\r\n",
-                     ((strcmp(g_client_id, "IMEI") == 0) && (g_info.imei[0] != '\0'))
-                         ? g_info.imei
-                         : ((g_client_id[0] != '\0') ? g_client_id : G4_MQTT_CLIENT_ID),
-                     (g_broker_user[0] != '\0') ? g_broker_user : "-",
-                     g_sub_topic);
-            log_info("[G4] IMEI=%s IMSI=%s ICCID=%s CSQ=%u IP=%s\r\n",
-                     (g_info.imei[0]  != '\0') ? g_info.imei  : "-",
-                     (g_info.imsi[0]  != '\0') ? g_info.imsi  : "-",
-                     (g_info.iccid[0] != '\0') ? g_info.iccid : "-",
-                     (unsigned)g_info.csq,
-                     (g_info.ip[0]    != '\0') ? g_info.ip    : "-");
-            if (g_info.vbat_valid)
-            {
-                log_info("[G4] 模组自测供电 = %u mV\r\n", (unsigned)g_info.vbat_mv);
-            }
-            /* 【去 G4_STATE_REG_ARM 而不是直接 ONLINE】: 上线之前把驻网/PS 变化的
-             * 主动上报打开。放在这里(而不是 ONLINE 里)是本工程的一条硬不变式 ——
-             * ONLINE 稳态下不许发 AT, 详见 g4_cereg_diag_poll() 上面的长注释。 */
-            g4_goto_state(G4_STATE_REG_ARM);
-            break;
-        }
-
-        if (++g_retry_cnt > 3U)
-        {
-            log_info("[G4] MQTTSUB fail -> rebuild\r\n");
-            g4_goto_state(G4_STATE_ERROR);
-        }
+        g4_st_mqtt_sub(now);
         break;
-    }
 
     case G4_STATE_REG_ARM:
-    {
-        /* ---- 上线前最后一次配置: 让模组主动报"驻网 / PS 去附着"变化 ----
-         *
-         * 【为什么必须在这里做】
-         *   ① 本工程有一条被主机测试钉死的不变式: ONLINE 稳态下不许发任何多余 AT
-         *      (test_state.c 的 "ONLINE 稳态下 5 秒内发的 AT 命令数 = 0")。现场日志
-         *      也证实"在 ONLINE 里敲 AT"会诱发模组 AT 应用重启(+MATREADY 387 次,
-         *      全部落在我们发字节后 8~49ms)并打死 MQTT 会话。所以这两条必须在
-         *      上线【之前】发。
-         *   ② 手册要求 MQTTCFG 类命令在"MQTT 连接未创建"时下发更稳 —— 此刻还没
-         *      MQTTCONN, 正合适。
-         *   ③ 每轮建链(MQTT 快修/断电重启之后)都会重新走一遍: 模组自己重启或整链路
-         *      断电后这两个设置可能已被清掉。
-         *
-         * 【失败了绝不影响建链】: 这只是观测手段。发不出去就退化成"没有主动上报",
-         * 与加这个功能之前的行为一致 —— 绝不能因为它连不上 broker。
-         *
-         * 【只读性质】这两条命令只改变"模组报不报", 不改变我们的任何判定逻辑;
-         * 本工程此刻还没有任何一处消费 g_cereg.stat(第 2 步才阈值化)。 */
-#if (G4_CEREG_DIAG_ENABLE && G4_CEREG_URC_ENABLE)
-        {
-            g4_cmd_res_t r;
-
-            if (g_step == 0u)
-            {
-                r = g4_io_cmd_run("AT+CEREG=2", "OK", AT_CMD_TIMEOUT_MS);
-                if (r == G4_CMD_RUNNING) { break; }
-                if (r == G4_CMD_OK)
-                {
-                    log_info("[CEREG] AT+CEREG=2 已下发 —— 模组会主动上报驻网变化\r\n");
-                }
-                else
-                {
-                    log_info("[CEREG] !! AT+CEREG=2 没成功(res=%d) —— 没有驻网主动上报,"
-                             "不影响建链\r\n", (int)r);
-                }
-                g_step = 1u;
-                break;
-            }
-
-            if (g_step == 1u)
-            {
-                r = g4_io_cmd_run("AT+CGEREP=1", "OK", AT_CMD_TIMEOUT_MS);
-                if (r == G4_CMD_RUNNING) { break; }
-                if (r == G4_CMD_OK)
-                {
-                    g_cereg.urc_armed = true;
-                    log_info("[CEREG] AT+CGEREP=1 已下发 —— PS 去附着会主动上报"
-                             "(+CGEV: NW DETACH 是最强的断网证据)\r\n");
-                }
-                else
-                {
-                    log_info("[CEREG] !! AT+CGEREP=1 没成功(res=%d) —— 没有 PS 事件上报,"
-                             "不影响建链\r\n", (int)r);
-                }
-                g_step = 2u;
-                break;
-            }
-
-            if (g_step == 2u)
-            {
-                /* 【上线前把当前驻网状态量一次】—— 这是唯一一次可靠地拿到 <stat> 的
-                 * 机会: 开机之后只有这里能问 (ONLINE 稳态不许发 AT, 见上面的长注释)。
-                 * URC 只在"变化时"才来, 没有这个种子值就不知道起点是好是坏。
-                 * 用 at_reg_stat() 按【轮询应答形态】解析 (<n>,<stat>)。 */
-                r = g4_io_cmd_run("AT+CEREG?", "+CEREG:", AT_CMD_TIMEOUT_MS);
-                if (r == G4_CMD_RUNNING) { break; }
-
-                if (r == G4_CMD_OK)
-                {
-                    uint8_t stat = at_reg_stat(g4_io_cmd_resp(), "+CEREG:");
-
-                    if (stat != 0xFFu)
-                    {
-                        g_cereg.stat = stat;
-                        log_info("[CEREG] 上线前驻网状态: stat=%u (%s)\r\n",
-                                 (unsigned)stat, g4_reg_stat_text(stat));
-                    }
-                    else
-                    {
-                        log_info("[CEREG] 上线前 AT+CEREG? 应答里没有 stat, 原样: %s\r\n",
-                                 g4_io_cmd_resp());
-                    }
-                }
-                else
-                {
-                    log_info("[CEREG] !! 上线前 AT+CEREG? 没应答(res=%d) —— 驻网状态未知\r\n",
-                             (int)r);
-                }
-                g_step = 3u;
-                break;
-            }
-        }
-#endif
-        g4_goto_state(G4_STATE_ONLINE);
+        g4_st_reg_arm(now);
         break;
-    }
 
     case G4_STATE_ONLINE:
-    {
-        /* 【先看: 在线期间模组偷偷重启过没有?】
-         * 现场证据(日志 78.txt):
-         *   1) 每一次 "+MATREADY" 都紧跟在我们的命令之后(距上次发送 10~41ms);
-         *   2) 每个会话都是"第 1 条 MQTTPUB 被收下但 broker 不回 puback, 第 2 条起回 601";
-         *   3) 模组【不发 conn URC】, 所以状态机一直以为还在线。
-         * 结论: 模组 AT 应用层一重启, MQTT 会话就没了, 而且没有任何人告诉我们。
-         * 处理: 标记"会话可疑"并大声报出来 —— 下一次发布只要失败或拿不到 puback,
-         *       pub_poll 里就会走 MQTT 快修(2~5 秒), 而不是攒够失败去断电(40~60 秒)。 */
-        if (g4_io_ready_total() != g_ready_base_online)
-        {
-            g_ready_base_online = g4_io_ready_total();
-            g_mqtt_suspect      = true;
-            log_info("[G4] !! ONLINE 期间模组报出 \"+MATREADY\"(AT 应用层重启过, 累计 %lu 次)"
-                     " —— MQTT 会话多半已经没了, 标记【可疑】; 下一次发布失败就走 MQTT 快修\r\n",
-                     (unsigned long)g_ready_base_online);
-        }
-
-        /* 【保活停滞看门狗】: 详见 g4_at_set_link_watchdog() 的说明。
-         * 窗口由 main.c 按实际心跳周期设定(心跳开着 = 5 × 周期, 关着 = 0 即不用)。
-         * ⚠️ 【必须用有符号比较 —— 这里踩过一次, 就是"中间那次自动重启"的原因】
-         * 无符号相减在 tick 反超时会得到 0xFFFFFFFF(≈4294967 秒), 于是"保活停滞"
-         * 当场误报, 链路被无端重建。
-         * ★2026-10-04 第 2 步: 模组正在自己重连(conn state=1)时【不开这条枪】★
-         *   模组此刻是在干活的, 而且它配了 reconn(默认 20/40/60s)。看门狗这时候
-         *   开火, 等于在它刚要回来时又把它按下去 —— 现场那 27 次断电里有一大半
-         *   就是这么来的。让开的时限由 G4_MQTT_RECONN_GRACE_MS 兜住(超过它
-         *   g4_at_poll 里的 conn 分支会走 MQTT 快修)。 */
-        if ((g_hb_stall_ms != 0u) && g_last_pub_ok_valid &&
-            (g_mqtt_reconn_since == 0u) &&
-            ((int32_t)((uint32_t)now - g_last_pub_ok_tick) > (int32_t)g_hb_stall_ms))
-        {
-            log_info("[G4] !! 保活停滞: 已经 %lus 没有一次发布成功"
-                     "(窗口 %lus) -> 判链路已死\r\n",
-                     (unsigned long)(((uint32_t)now - g_last_pub_ok_tick) / 1000u),
-                     (unsigned long)(g_hb_stall_ms / 1000u));
-            log_info("[G4] !! 常见原因: 模组假死(MQTT 掉了但不发 URC) / 中间 NAT 把连接掐了\r\n");
-            /* 计数清零后交给统一恢复入口(4G_RST 断电重启, 带最小间隔防抖) */
-            g_pub_fail_cnt = 0U;
-            g4_link_recover("保活停滞(长时间没有一次发布成功)");
-        }
-        /* 保活由模组内部 PINGREQ + 应用层 GW_ONLINE 心跳共同维持;
-         * 断线由 g4_urc 的 conn URC 和发布失败计数检测;
-         * 上行是否真的到云端, 由 QoS 1 的 puback 说话(g4_urc_puback_count)。 */
+        g4_st_online(now);
         break;
-    }
 
     case G4_STATE_DIAG_DONE:
-        /* 【自检档的终点】G4_DIAG_STOP_AFTER_PDP=1 时停在这里: 只验收到
-         * "AT 沟通正常 + 已入网拿到 IP", 不碰 MQTT。每 30s 重查一次信号,
-         * 既能持续证明链路是活的, 又不会因为 MQTT 连不上把网络链路拆掉重来。 */
-        if ((now - g_state_tick) > 30000u)
-        {
-            g4_cmd_res_t r;
-
-            g_state_tick = now;
-            log_info("[G4] [自检] 模组沟通正常 IMEI=%s IP=%s CSQ=%u%s%u mV\r\n",
-                     (g_info.imei[0] != '\0') ? g_info.imei : "-",
-                     (g_info.ip[0] != '\0') ? g_info.ip : "-",
-                     (unsigned)g_info.csq,
-                     g_info.vbat_valid ? " 供电=" : "",
-                     (unsigned)g_info.vbat_mv);
-
-            r = g4_io_cmd_run("AT+CSQ", "+CSQ:", AT_CMD_TIMEOUT_MS);
-            if (r == G4_CMD_RUNNING) { break; }
-
-            if (r == G4_CMD_OK)
-            {
-                log_info("[G4] [自检] AT+CSQ 应答: %s\r\n", g4_io_cmd_resp());
-                /* 模组是不是被供电搞死最直接的一条: 每轮自检都读一次它的自测电压 */
-                (void)g4_read_vbat();
-            }
-            else
-            {
-                log_info("[G4] [自检] !! AT+CSQ 不应答了: 模组可能掉电/死机, 重新建链\r\n");
-                g4_goto_state(G4_STATE_ERROR);
-            }
-        }
+        g4_st_diag_done(now);
         break;
 
     case G4_STATE_ERROR:
     default:
-        g4_urc_set_offline();
-        g_pub_pending = false;
-        g_info.pdp_ok = false;
-        g_info.ip[0]  = '\0';
-        local_alarm_trigger(ALARM_4G_OFFLINE);
-        if ((now - g_state_tick) > G4_FAIL_RESTART_MS)
-        {
-            g_fail_cnt++;
-
-            /* 【连续 G4_REBUILD_RST_CNT 次重建都没能回到 ONLINE】
-             * 说明"只重新握手"这条路走不通了(模组卡在某个状态、或者网络侧根本没
-             * 恢复), 这时候按现场要求上 4G_RST: 断电重启模组。 */
-            if (g_fail_cnt >= G4_REBUILD_RST_CNT)
-            {
-                g_fail_cnt = 0u;
-                g4_link_recover("连续建链失败(重新握手已试过多次)");
-                break;
-            }
-
-            /* 第一次失败不碰电源: 让模组连着供电把起动/入网走完
-             * (每次失败就断电 = 模组刚起动到一半被拉闸, 永远起不来) */
-            log_info("[G4] rebuild #%u (no power cycle)\r\n", (unsigned)g_fail_cnt);
-            g4_goto_state(G4_STATE_AT_SYNC);
-        }
+        g4_st_error(now);
         break;
+
     }
 }
 
