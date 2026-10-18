@@ -256,7 +256,8 @@ powershell -ExecutionPolicy Bypass -File tools\verify.ps1
 - [ ] 切断 `cloud ↔ lora_business` 双向依赖
 - [x] 编译期开关全部收敛到 pp/core/app_config.h（main.c 已无 #define MAIN_*；仍全部 #ifndef，Keil Define 可覆盖）
 - [x] 两套 JSON 的边界已成文（docs/JSON.md）：解析用 `cloud_json`（零堆），构造/打印用 `cJSON` + 静态池；**不做合并**（合并会丢其中一边的内存特性）
-- [ ] 修复被编码损坏的注释（`cloud_proto.c` 293 行、`radio.c` 76 处等）
+- [x] 修复被编码损坏的注释：`app/` 下 `U+FFFD` 已清零（`tools/check_comments.py` 全 0），
+      做法见 `REFACTOR_STATUS.md` 第三节（整块替换，代码行逐字节不变）
 
 每一步都单独提交，并且必须保持：**构建 0/0、图像尺寸不变或按预期变小、
 主机测试 1840/1840**。

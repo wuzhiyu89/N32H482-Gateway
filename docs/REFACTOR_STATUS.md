@@ -53,19 +53,26 @@ LoRa 侧新增 `lora_internal.h`，`lora_field.c` 独立。
 - 编译期开关全部收敛到 `app/core/app_config.h`（`main.c` 已无 `#define MAIN_*`）；
 - PowerShell 脚本 BOM 门禁（`_host_test/check_ps1.py`）。
 
-### 6. 坏注释修复（进行中）
+### 6. 坏注释修复（完成）
 
-编码事故留下的 `U+FFFD`。已清零：`radio.c`、`llcc68-board.h`、
-`cloud_cmd_rule.c`、`cloud_cmd_sys.c`、`cloud_proto.c`（文件头 120 行）。
-**剩余 235 行（103 个注释块）**，分布：
-`cloud_proto.c` 36 块 / `cloud_cmd_devices.c` 28 块 / `cloud_uplink.c` 30 块 / `cloud_cmd_cfg.c` 9 块。
+编码事故留下的 `U+FFFD`，**`app/` 下已清零**（`tools/check_comments.py` 全部 0 块）：
+
+- 早期：`radio.c`、`llcc68-board.h`、`cloud_cmd_rule.c`、`cloud_cmd_sys.c`；
+- 本轮按文件逐个整块重写（每块 `(start,end)` 由脚本给出，代码行逐字节不变）：
+  `cloud_uplink.c` 30 块 → 0、`cloud_cmd_devices.c` 28 块 → 0、
+  `cloud_proto.c` 36 块 → 0（`cloud_cmd_cfg.c` 的 9 块已在上一提交清零）；
+- 额外：`cloud_cmd_devices.c` 里两处 **log 格式串**中的 `U+FFFD` 已修
+  （`dev.ctrl` 的两条日志），`cloud_internal.h` 注释里的 `app/cloud/*.c` 改成
+  "app/cloud 目录下的 .c"，消掉 `-Wcomment`。
+
+唯一剩下的 `U+FFFD` 在 `firmware/n32h47x_48x_std_periph_driver/src/n32h47x_48x_pga.c`
+（厂商代码，按约定不改）。
 
 ## 二、未完成
 
-1. 坏注释剩余 239 行（按文件逐个重写，每批构建 + 1840 条断言）；
-2. `lora_business.c`（2,690 行）继续拆：从机表 / 绑定 / 解绑 / 声光 / 下发队列；
-3. `config_store.c`（2,283 行）按 9 个配置域拆解析/序列化；
-4. **板上冒烟测试**（唯一未做的验证）：
+1. `lora_business.c`（2,690 行）继续拆：从机表 / 绑定 / 解绑 / 声光 / 下发队列；
+2. `config_store.c`（2,283 行）按 9 个配置域拆解析/序列化；
+3. **板上冒烟测试**（唯一未做的验证）：
    - 开机横幅 → `进入主循环`；
    - `===== MQTT ONLINE! =====` + 一条 `status.report 已发`；
    - 液位发一帧，确认 `[LoRa RX]` / `[LEVEL]`；
@@ -122,4 +129,5 @@ LoRa 侧新增 `lora_internal.h`，`lora_field.c` 独立。
 **运维结论（重要）**：液位从机是电池设备，只在**自己上报后的短暂窗口**内监听下行。
 - #set 失败率低：0x06 会每 5 s 重发、最多 3 条；
 - #get 只发一次 0x07，**必须在设备刚上报后立刻执行**，否则 12 s 超时。
-  这不是网关缺陷，是"只发一次"策略与休眠设备的固有组合；如要改善，可把 0x07 也改成和 0x06 一样的重发节奏。
+  这不是网关缺陷，是"只发一次"策略与休眠设备的固有组合。
+  **【用户已决定保持现状：不把 0x07 改成重发】**，后续重构不要顺手改这一行为。
