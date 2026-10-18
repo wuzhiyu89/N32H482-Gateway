@@ -68,45 +68,6 @@ static uint32_t g_last_poll_tick;
 /* 网关 UID 在 lora_business_init 里从 param_save 读入 (支持后续本地/云端修改) */
 uint8_t g_gw_uid[CFG_UID_BYTES];
 
-/* ========== 内部: 设备绑定窗口状态机(P5, LoRa 0x04) ==========
- *
- * 【为什么绑定只在云端开窗口时才监听 0x04】(用户 2026-09-29 决策):
- *   平时 0x04 是个"陌生设备广播" —— 任何附近设备都可能发, 网关常驻监听就
- *   会被无关帧打扰并回 ACK(空口被刷)。所以常态是 BIND_IDLE, 只有当云端
- *   下发 dev.bind{serial,name,pairWindowSeconds}、经 pair_hook 调
- *   lora_business_open_bind_window() 时才进入 BIND_LISTENING 打开窗口,
- *   到点自动回 IDLE。
- *
- * 【状态转移】(tick 用 get_tick_ms, 32 位 ms, 用无符号差值判回绕):
- *   BIND_IDLE         -- open_bind_window -->  BIND_LISTENING
- *   BIND_LISTENING    -- 收到 0x04      -->  BIND_WAIT_DEV_ACK (记 pending_uid, 立即发一次 0x80)
- *   BIND_WAIT_DEV_ACK -- 收到对端 0x80 -->  BIND_IDLE  + 写 config_store + 触发 BOUND
- *   BIND_WAIT_DEV_ACK -- 每 5s          -->  重发 0x80 ACK(给设备机会重收)
- *   任意 LISTENING/WAIT_DEV_ACK -- 窗口到点 -->  BIND_IDLE (WAIT_DEV_ACK 时还要触发 BIND_FAILED)
- *
- * 【只允许一个绑定并发】: 同一时刻只跟踪一个发起绑定的设备(pending_uid),
- *   窗口里第二个不同地址的 0x04 直接被 0x81 拒掉(不打断当前握手)。
- */
-typedef enum
-{
-    BIND_IDLE         = 0,   /* 未开窗口 */
-    BIND_LISTENING    = 1,   /* 窗口已开, 在等 0x04 */
-    BIND_WAIT_DEV_ACK = 2,   /* 已回 0x80, 等设备回 0x80 确认 */
-} bind_state_t;
-
-static struct
-{
-    bind_state_t state;
-    uint32_t     deadline_tick;      /* 窗口到期 tick(进入 LISTENING 时设定) */
-    uint32_t     last_ack_tx_tick;   /* 上次向设备发 0x80 ACK 的 tick */
-    char         expected_serial[CFG_SERIAL_MAX + 1U];   /* 落盘用, 来自云端 dev.bind */
-    char         expected_name[CFG_NAME_MAX + 1U];
-    bool         is_sensor;          /* sen.bind=true 液位 / dev.bind=false 声光 */
-    uint8_t      dev_type;           /* ★ 第 11 条: dev.bind 给的联动设备类型
-                                      * (cfg_dev_type_t 1/2/3); sen.bind 时无意义 */
-    uint8_t      pending_uid[CFG_UID_BYTES];     /* 发起绑定的设备地址(收到 0x04 后登记) */
-} g_bind;
-
 /* ========== 解绑两阶段状态机(2026-09-30 用户最终口径) ==========
  *
  * 【为什么 g_unbind 完全独立、不复用从机 pending_func 重传逻辑】
@@ -153,7 +114,6 @@ static struct
     .phase2_retry = 0U,
 };
 
-static lora_bind_event_fn g_bind_event_cb = NULL;
 
 /* ==================== ★2026-10-08: 上行 hex 通道已整体删除 ★ ====================
  *
@@ -180,251 +140,6 @@ static lora_bind_event_fn g_bind_event_cb = NULL;
  *   rt/gw/{gwId}/telemetry 的上报路径完全不受影响。
  * ========================================================================= */
 
-/* ========== 内部: 设备绑定窗口状态机(P5, LoRa 0x04) ==========
- *
- * 下列 7 个静态函数配合 on_frame / lora_business_poll 实现:
- *   _bind_fire()              —— 统一出口: 触发事件回调(没注册只打日志)
- *   _bind_send_ack_to_pending()—— 向发起绑定的设备发 0x80 ACK
- *   _bind_handle_0x04()       —— 收到 0x04 绑定请求
- *   _bind_handle_dev_ack()    —— 收到设备回的 0x80 确认(绑定成立)
- *   _bind_logic()             —— 周期调用: 重发 ACK + 窗口到期
- *   lora_business_set_bind_event_cb() / lora_business_open_bind_window() —— 对外 API
- *
- * 时序概要(详见 g_bind 上方注释):
- *   设备发 0x04 → 网关回 0x80 → 设备回 0x80 → 绑定成功。
- *   网关每 5s 重发一次 0x80(LORA_BIND_ACK_INTERVAL_MS), 直到设备回 0x80 或窗口到期。
- */
-
-/* 统一的事件出口。uid_hex 必须是 6 字符大写 hex 串, 或 NULL 表示"无具体设备"(如超时) */
-static void _bind_fire(const char *uid_hex, bool is_sensor, lora_bind_event_t event)
-{
-    const char *ev_str =
-        (event == LORA_BIND_EVENT_BOUND)       ? "bound"       :
-        (event == LORA_BIND_EVENT_BIND_FAILED) ? "bind_failed" :
-        (event == LORA_BIND_EVENT_UNBOUND)     ? "unbound"     : "unknown";
-
-    log_info("[BIND] event=%s uid=%s type=%s\r\n",
-             ev_str,
-             (uid_hex != NULL) ? uid_hex : "(none)",
-             is_sensor ? "sensor" : "device");
-
-    if (g_bind_event_cb != NULL)
-    {
-        g_bind_event_cb(uid_hex, is_sensor, event);
-    }
-}
-
-/* 向发起绑定的设备(g_bind.pending_uid)发 0x80 ACK(应答它的 0x04 绑定请求) */
-static void _bind_send_ack_to_pending(void)
-{
-    (void)lora_business_send_ack(g_gw_uid, g_bind.pending_uid,
-                                 LORA_FUNC_BIND_REQ, true, 0U);
-    g_bind.last_ack_tx_tick = get_tick_ms();
-    log_info("[BIND] 已向 %02X%02X%02X 发 0x80 ACK(应答 0x04 绑定请求)\r\n",
-             g_bind.pending_uid[0], g_bind.pending_uid[1], g_bind.pending_uid[2]);
-}
-
-/* 收到 0x04 绑定请求: 检查容量 → 登记 pending_uid → 立即回 0x80 */
-static void _bind_handle_0x04(const lora_frame_t *frame)
-{
-    /* 容量检查(总数≤5 / 液位≤4 / 声光≤3) —— 不够直接回 0x81, 不进入握手 */
-    if (!config_store_can_add(g_bind.is_sensor))
-    {
-        log_info("[BIND] !! %02X%02X%02X 请求绑定, 但%s已达上限, 回 0x81 拒绝\r\n",
-                 frame->dev_uid[0], frame->dev_uid[1], frame->dev_uid[2],
-                 g_bind.is_sensor ? "液位传感器" : "声光设备");
-        (void)lora_business_send_ack(g_gw_uid, frame->dev_uid,
-                                     LORA_FUNC_BIND_REQ, false, 0x06U);  /* err 0x06 = 容量满 */
-        return;
-    }
-
-    /* 已在等另一台设备的 ACK → 直接拒掉这次(单绑定并发) */
-    if (g_bind.state == BIND_WAIT_DEV_ACK)
-    {
-        log_info("[BIND] !! %02X%02X%02X 请求绑定, 但已在等 %02X%02X%02X 回 ACK, 回 0x81 拒绝\r\n",
-                 frame->dev_uid[0], frame->dev_uid[1], frame->dev_uid[2],
-                 g_bind.pending_uid[0], g_bind.pending_uid[1], g_bind.pending_uid[2]);
-        (void)lora_business_send_ack(g_gw_uid, frame->dev_uid,
-                                     LORA_FUNC_BIND_REQ, false, 0x05U);  /* err 0x05 = 忙 */
-        return;
-    }
-
-    /* 登记 pending_uid → 转入 WAIT_DEV_ACK → 立即发 0x80 */
-    memcpy(g_bind.pending_uid, frame->dev_uid, CFG_UID_BYTES);
-    g_bind.state = BIND_WAIT_DEV_ACK;
-    log_info("[BIND] 收到 %02X%02X%02X 的 0x04 绑定请求(type=%s), 进入 WAIT_DEV_ACK\r\n",
-             g_bind.pending_uid[0], g_bind.pending_uid[1], g_bind.pending_uid[2],
-             g_bind.is_sensor ? "sensor" : "device");
-    _bind_send_ack_to_pending();
-}
-
-/* 收到设备回的 0x80 确认: 写 config_store + 追加运行期从机表 + 触发 BOUND */
-static void _bind_handle_dev_ack(const lora_frame_t *frame)
-{
-    /* 校验是不是 pending_uid 回的(避免别的设备 0x80 蹭进来) */
-    if (memcmp(frame->dev_uid, g_bind.pending_uid, CFG_UID_BYTES) != 0)
-    {
-        log_info("[BIND] !! 收到 %02X%02X%02X 的 0x80, 但 pending 是 %02X%02X%02X, 忽略\r\n",
-                 frame->dev_uid[0], frame->dev_uid[1], frame->dev_uid[2],
-                 g_bind.pending_uid[0], g_bind.pending_uid[1], g_bind.pending_uid[2]);
-        return;
-    }
-
-    /* 1) hex 串形式(供 config_store / 事件回调用) */
-    char uid_hex[CFG_UID_STR_MAX];
-    /* cfg_uid_from_bytes 把 13 字节转 hex, 不会失败(非全 0 即有效) */
-    (void)cfg_uid_from_bytes(g_bind.pending_uid, uid_hex);
-
-    /* 2) 追加到运行期从机表(失败就别写 config_store, 免得两边不一致) */
-    slave_type_t type = g_bind.is_sensor ? SLAVE_TYPE_SENSOR : SLAVE_TYPE_ALARM_OUT;
-    int idx = lora_slave_add(g_bind.pending_uid, type);
-    if (idx < 0)
-    {
-        /* ==================================================================
-         * ★★2026-10-14 重绑: 已在从机表 ⇒ 允许再绑, 但【不新增】条目 ★★
-         * ------------------------------------------------------------------
-         * 【用户场景】设备坏了换新, 重新烧录后回到【同一默认地址】
-         *   ⇒ 网关必须允许同 UID 再绑一次; 若拒绝, 现场换设备就必须先解绑,
-         *     很难操作。且从机表里【不能出现两条同 UID】。
-         *
-         * 【用户口径, 三条】
-         *   ① serial/name 用本次绑定窗口里的新值【覆盖】(换了设备, 标识也该换);
-         *   ② 【不】动 report_period_s 等运行参数 —— 平台一定会再下发一次上报周期,
-         *      等于给新设备设一遍(动了反而把平台设的值悄悄改回默认 60);
-         *   ③ 【不继承】旧设备的历史值 ⇒ 清掉该 UID 的快照。
-         *      理由: 否则新设备还没上报时 sen.query 就回旧水位、level_supervisor
-         *      会拿旧水位算档位(新设备一上电就按旧水位点灯)、失联判定也可能因
-         *      "缓存里的 rx_tick_ms 很新"而误判在线。
-         *
-         * ⚠️ 这里【不能】用 config_store_bind_device() —— 它对已存在的 UID 直接
-         *    返回 CFG_ERR_RANGE(见该函数开头), 会静默什么都不改。
-         * ⚠️ 也【不能】用 config_store_unbind_device() + bind "先删再建" ——
-         *    unbind 会连带清掉 gears[].target_uid 里指向该 UID 的条目,
-         *    那台设备以后收不到联动指令(能绑定、能上报, 就是不动灯)。
-         *
-         * ⚠️⚠️ 【本分支目前没有主机单测覆盖】⚠️⚠️
-         *   _host_test 里没有任何套件链接【真的】app/links/lora/lora_business.c
-         *   (test_cloud 用的是 _host_test/fake_lora_business.c 那个假实现),
-         *   因为本文件依赖 LoRa/radio 时序。⇒ 改这段代码【必须上板验证】,
-         *   "主机单测全绿"对它没有意义。
-         *   已有的主机覆盖只到它调用的两个新函数:
-         *     · config_store_rebind_device() -> test_cfg 用例 [14]
-         *     · last_value_clear_uid()       -> test_last_value 用例 [10]
-         * ================================================================== */
-        if ((idx == -1) && (lora_slave_find(g_bind.pending_uid) != 0xFFU))
-        {
-            cfg_result_t rb;
-
-            log_info("[BIND] %s %s 重新绑定(已在从机表, 不新增): serial=%s name=%s\r\n",
-                     g_bind.is_sensor ? "液位传感器" : "声光设备",
-                     uid_hex,
-                     g_bind.expected_serial[0] ? g_bind.expected_serial : "(none)",
-                     g_bind.expected_name[0]    ? g_bind.expected_name    : "(none)");
-
-            /* ① 覆盖 serial/name(设备侧连 type 一起更新; 运行参数一律不动) */
-            rb = config_store_rebind_device(uid_hex, g_bind.expected_serial,
-                                            g_bind.expected_name, g_bind.dev_type,
-                                            cloud_proto_get_now_ts());
-            if (rb != CFG_OK)
-            {
-                /* 落盘失败: 运行期表已经是"已存在"状态, 不必回滚, 但要让现场看见 */
-                log_info("[BIND] !! 重绑写 config_store 失败(code=%d), 本次只更新了运行期表\r\n",
-                         (int)rb);
-            }
-
-            /* ③ 清该 UID 的历史快照(新设备不继承旧值; 其它 UID 不受影响) */
-            (void)last_value_clear_uid(g_bind.pending_uid);
-
-            _bind_fire(uid_hex, g_bind.is_sensor, LORA_BIND_EVENT_BOUND);
-            g_bind.state = BIND_IDLE;
-            return;
-        }
-
-        /* 到这里就是真失败: 从机表【满了】 */
-        log_info("[BIND] !! 从机表【已满】, 无法绑定 %s(idx=%d) —— 请先解绑不用的设备\r\n",
-                 uid_hex, idx);
-        _bind_fire(uid_hex, g_bind.is_sensor, LORA_BIND_EVENT_BIND_FAILED);
-        g_bind.state = BIND_IDLE;
-        return;
-    }
-
-    /* 3) 写 config_store(失败回滚运行期表)
-     * ★★ 必须与 CFG_OK(== 0) 比较, 不能用 ! 取反 ★★
-     * cfg_result_t 的语义是"0 = 成功"(CFG_OK=0, 其余全是错误码), 写成
-     * `if (!config_store_bind_device(...))` 会把【每一次绑定成功】都当成失败:
-     *   刚加进运行期表的设备被回滚掉、事件报 bind_failed, 但 config_store 内部
-     *   其实已经 save 落 Flash 了 —— 结果"云端看到绑定失败, 重启后设备又冒出来"。
-     * (2026-09-29 评审修正) */
-    uint32_t now_ts = cloud_proto_get_now_ts();
-    if (config_store_bind_device(uid_hex, g_bind.expected_serial,
-                                 g_bind.expected_name, g_bind.is_sensor,
-                                 g_bind.dev_type,
-                                 now_ts) != CFG_OK)
-    {
-        log_info("[BIND] !! config_store_bind_device 失败, 回滚运行期表\r\n");
-        (void)lora_slave_del(g_bind.pending_uid);
-        _bind_fire(uid_hex, g_bind.is_sensor, LORA_BIND_EVENT_BIND_FAILED);
-        g_bind.state = BIND_IDLE;
-        return;
-    }
-
-    /* 4) 绑定成功 */
-    log_info("[BIND] %s %s 绑定成功(uid=%s, serial=%s, name=%s), 已写 config_store + 从机表\r\n",
-             g_bind.is_sensor ? "液位传感器" : "声光设备",
-             uid_hex, uid_hex,
-             g_bind.expected_serial[0] ? g_bind.expected_serial : "(none)",
-             g_bind.expected_name[0]    ? g_bind.expected_name    : "(none)");
-    _bind_fire(uid_hex, g_bind.is_sensor, LORA_BIND_EVENT_BOUND);
-
-    g_bind.state = BIND_IDLE;
-    memset(g_bind.pending_uid, 0, sizeof(g_bind.pending_uid));
-}
-
-/* 周期调用(挂在 lora_business_poll):
- *   - 窗口未到期时, 若在 WAIT_DEV_ACK 且距上次发 0x80 已过 5s → 重发 0x80
- *   - 窗口到期: 若在 WAIT_DEV_ACK → 触发 BIND_FAILED; 一律回 IDLE
- * 用 (int32_t)(now - deadline_tick) >= 0 判到期 —— tick 32 位无符号回绕时
- * "已过 deadline" 的差值是小正数, 未过时是大负数(强转 int32 为负), 这样判才对。
- */
-static void _bind_logic(void)
-{
-    if (g_bind.state == BIND_IDLE) return;
-
-    uint32_t now = get_tick_ms();
-
-    /* 窗口未到期: 看是否该重发 0x80 */
-    if ((int32_t)(now - g_bind.deadline_tick) < 0)
-    {
-        if (g_bind.state == BIND_WAIT_DEV_ACK)
-        {
-            if ((uint32_t)(now - g_bind.last_ack_tx_tick) >= LORA_BIND_ACK_INTERVAL_MS)
-            {
-                _bind_send_ack_to_pending();
-            }
-        }
-        return;
-    }
-
-    /* 窗口到期 */
-    if (g_bind.state == BIND_WAIT_DEV_ACK)
-    {
-        char uid_hex[CFG_UID_STR_MAX];
-        /* cfg_uid_from_bytes 不会失败, 直接走失败回调 */
-        (void)cfg_uid_from_bytes(g_bind.pending_uid, uid_hex);
-        _bind_fire(uid_hex, g_bind.is_sensor, LORA_BIND_EVENT_BIND_FAILED);
-        log_info("[BIND] 窗口到期, 未收到 %02X%02X%02X 的确认, 绑定失败\r\n",
-                 g_bind.pending_uid[0], g_bind.pending_uid[1], g_bind.pending_uid[2]);
-    }
-    else
-    {
-        log_info("[BIND] 窗口到期, 期间没有设备发起 0x04, 绑定失败(无具体设备)\r\n");
-        _bind_fire(NULL, g_bind.is_sensor, LORA_BIND_EVENT_BIND_FAILED);
-    }
-
-    g_bind.state = BIND_IDLE;
-    memset(g_bind.pending_uid, 0, sizeof(g_bind.pending_uid));
-}
-
 /* ========== 内部: 解绑收尾(P5, LoRa 0x05) ==========
  *
  * 在两处被调用:
@@ -446,7 +161,7 @@ static bool _unbind_finalize(const uint8_t uid[CFG_UID_BYTES], bool is_sensor)
     log_info("[UNBIND] %02X%02X%02X(%s) 已删除 config_store, 触发 UNBOUND 事件\r\n",
              uid[0], uid[1], uid[2], uid_hex);
     (void)lora_slave_del(uid);
-    _bind_fire(uid_hex, is_sensor, LORA_BIND_EVENT_UNBOUND);
+    lora_bind_fire_event(uid_hex, is_sensor, LORA_BIND_EVENT_UNBOUND);
     return true;
 }
 
@@ -460,7 +175,7 @@ static bool _unbind_finalize(const uint8_t uid[CFG_UID_BYTES], bool is_sensor)
  *
  * 6 个 helper 配合 g_unbind 状态机:
  *   _unbind_send_frame()        —— 用从机表里目标 slave 的 pending_func=0x05 发一帧
- *   _unbind_fire_event()        —— 把 g_unbind.uid 转 hex + 调 _bind_fire 上报事件
+ *   _unbind_fire_event()        —— 把 g_unbind.uid 转 hex + 调 lora_bind_fire_event 上报事件
  *   _unbind_clear_slave_state() —— 清从机表里目标格的 state/pending_func(不删条目)
  *   _unbind_reset()             —— 清 g_unbind 回 IDLE(释放锁)
  *   _unbind_on_ack()            —— 收到设备 ack 时按 state 处理
@@ -489,13 +204,13 @@ static void _unbind_send_frame(void)
     g_unbind.last_send_tick   = now;
 }
 
-/* 把 g_unbind.uid 转 hex + 调 _bind_fire 上报事件 */
+/* 把 g_unbind.uid 转 hex + 调 lora_bind_fire_event 上报事件 */
 static void _unbind_fire_event(lora_bind_event_t event)
 {
     char uid_hex[CFG_UID_STR_MAX];
     /* cfg_uid_from_bytes 把 13 字节转 hex, 不会失败(非全 0 即有效) */
     (void)cfg_uid_from_bytes(g_unbind.uid, uid_hex);
-    _bind_fire(uid_hex, g_unbind.is_sensor, event);
+    lora_bind_fire_event(uid_hex, g_unbind.is_sensor, event);
 }
 
 /* 清从机表里目标 slave 的 state/pending_func —— 不删条目(失败/故障路径用,
@@ -1033,7 +748,6 @@ _Static_assert(sizeof(((param_slave_uid_t *)0)->uid)      == CFG_UID_BYTES,
 _Static_assert(sizeof(((last_value_t *)0)->uid)           == CFG_UID_BYTES,
                "last_value_t.uid 必须等于 CFG_UID_BYTES");
 _Static_assert(sizeof(g_gw_uid)              == CFG_UID_BYTES, "g_gw_uid 必须 13 字节");
-_Static_assert(sizeof(g_bind.pending_uid)    == CFG_UID_BYTES, "g_bind.pending_uid 必须 13 字节");
 _Static_assert(sizeof(g_unbind.uid)          == CFG_UID_BYTES, "g_unbind.uid 必须 13 字节");
 /* (tc_record_t / ec_record_t 的断言放在各自的 .c 里 —— 本文件不 include 那两个头) */
 
@@ -1056,22 +770,20 @@ static void on_frame(const lora_frame_t *frame, int8_t rssi, int8_t snr)
     /* ============ 绑定窗口拦截(P5, LoRa 0x04) ============
      * 必须在 lora_slave_touch / 白名单之前 —— 0x04 绑定请求的目标地址是广播
      * FFFFFF, dev_uid 是发起绑定的设备自己, 它还不在从机表里, 会被白名单
-     * 丢弃。这里先拦下来走 _bind_handle_0x04, 由状态机决定是回 0x80 进入
+     * 丢弃。这里先拦下来走 lora_bind_handle_0x04, 由状态机决定是回 0x80 进入
      * 握手还是回 0x81 拒绝。
      *
      * 同样, 在 BIND_WAIT_DEV_ACK 期间, 对端回的 0x80 是"对 0x04 的确认",
      * 不能再走 handle_ack_from_device(那个是处理"对 0x01/0x03 下发的 ACK")。
      */
-    if (g_bind.state != BIND_IDLE && frame->func == LORA_FUNC_BIND_REQ)
+    if (lora_bind_accepts_0x04() && (frame->func == LORA_FUNC_BIND_REQ))
     {
-        _bind_handle_0x04(frame);
+        lora_bind_handle_0x04(frame);
         return;
     }
-    if (g_bind.state == BIND_WAIT_DEV_ACK
-        && frame->func == LORA_FUNC_RESP_OK
-        && memcmp(frame->dev_uid, g_bind.pending_uid, CFG_UID_BYTES) == 0)
+    if ((frame->func == LORA_FUNC_RESP_OK) && lora_bind_waiting_dev_ack(frame->dev_uid))
     {
-        _bind_handle_dev_ack(frame);
+        lora_bind_handle_dev_ack(frame);
         return;
     }
 
@@ -1219,7 +931,7 @@ void lora_business_poll(void)
 
     /* 1.6 绑定窗口状态机: 每轮都判(1ms 精度), 负责重发 0x80 + 窗口到期处理。
      *     只在非 IDLE 时有动作, 平常(没开窗口)立即 return, 不影响主循环节拍。 */
-    _bind_logic();
+    lora_bind_logic();
 
     /* 1.7 解绑两阶段状态机: 每轮都判(1ms 精度), 负责阶段1/等15s/阶段2 的
      *     3s 间隔发 0x05 + 阶段超时/成功/故障处理。只在非 IDLE 时有动作,
@@ -1248,54 +960,6 @@ void lora_business_poll(void)
  * 解绑 lora_business_unbind / 解绑的 0x05 重试 + cloud_cmd_unbind 的异步化
  * 在步骤5实现, 这里先把绑定的两个 API 落地。
  */
-void lora_business_set_bind_event_cb(lora_bind_event_fn fn)
-{
-    g_bind_event_cb = fn;
-}
-
-bool lora_business_open_bind_window(const char *serial, const char *name,
-                                     uint16_t window_s, bool is_sensor,
-                                     uint8_t dev_type)
-{
-    /* 参数校验: 允许 serial/name 为空(用 "" 落盘), 但 window_s 必须在合理区间 */
-    if (window_s == 0U || window_s > 300U) return false;
-    if (g_bind.state != BIND_IDLE) return false;   /* 已有窗口在进行 */
-
-    /* 落盘用的元数据(serial/name), 截断到数组上限, 空指针当 "" 处理 */
-    if (serial != NULL)
-    {
-        strncpy(g_bind.expected_serial, serial, CFG_SERIAL_MAX);
-        g_bind.expected_serial[CFG_SERIAL_MAX] = '\0';
-    }
-    else
-    {
-        g_bind.expected_serial[0] = '\0';
-    }
-    if (name != NULL)
-    {
-        strncpy(g_bind.expected_name, name, CFG_NAME_MAX);
-        g_bind.expected_name[CFG_NAME_MAX] = '\0';
-    }
-    else
-    {
-        g_bind.expected_name[0] = '\0';
-    }
-
-    g_bind.is_sensor       = is_sensor;
-    g_bind.dev_type        = dev_type;      /* 第 11 条: dev.bind 的类型, 绑定时写进 devices[].type */
-    g_bind.deadline_tick   = get_tick_ms() + (uint32_t)window_s * 1000U;
-    g_bind.last_ack_tx_tick = 0U;
-    memset(g_bind.pending_uid, 0, sizeof(g_bind.pending_uid));
-    g_bind.state           = BIND_LISTENING;
-
-    log_info("[BIND] 开放绑定窗口: window=%us, type=%s, serial=%s, name=%s\r\n",
-             (unsigned)window_s,
-             is_sensor ? "sensor" : "device",
-             g_bind.expected_serial[0] ? g_bind.expected_serial : "(none)",
-             g_bind.expected_name[0]    ? g_bind.expected_name    : "(none)");
-    return true;
-}
-
 /* ==================== 解绑(P5, LoRa 0x05, 两阶段状态机) ====================
  *
  * 【异步】接口: 收到调用立即进入阶段1, 不等结果。真正删 config_store + 从机表

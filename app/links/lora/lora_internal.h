@@ -76,6 +76,20 @@ void lora_reply_logic(void);
 /** 4G/MQTT 下行回调（注册给 g4_urc；唯一的下行入口） */
 void lora_mqtt_recv_cb(const char *topic, const uint8_t *data, uint16_t len);
 
+/* ==================== 绑定 0x04（lora_bind.c） ====================
+ * 窗口只在云端 dev.bind/sen.bind 时打开（平时收到 0x04 一律丢弃）。 */
+/** 窗口是否开着（任意外部状态），on_frame 据此决定要不要把 0x04 交给握手 */
+bool lora_bind_accepts_0x04(void);
+/** 是否正在等这台设备回 0x80 确认 */
+bool lora_bind_waiting_dev_ack(const uint8_t uid[LORA_UID_BYTES]);
+
+void lora_bind_handle_0x04(const lora_frame_t *frame);
+void lora_bind_handle_dev_ack(const lora_frame_t *frame);
+void lora_bind_logic(void);
+
+/** 上报一次绑定/解绑事件（绑定与解绑共用这个出口） */
+void lora_bind_fire_event(const char *uid_hex, bool is_sensor, lora_bind_event_t event);
+
 /** 0x08 出厂字段应答（on_frame 里 0x08 分支调用） */
 void lora_field_handle_resp(const lora_frame_t *frame, uint8_t idx);
 
