@@ -16,11 +16,14 @@
 #include "log.h"
 
 /**
- * @brief rule.mode —��文档 5.5 �18 � �auto/manual
- *   参数: mode(auto/manual, 必填), manualTimeoutSeconds(可�� 本次覆盖默认�
+ * @brief rule.mode — 文档 5.5 第 18 条：auto / manual
+ *   参数: mode(auto/manual, 必填), manualTimeoutSeconds(可选，本次覆盖默认值)
  *   响应: code 0 + data.configVersion(配置变了, 让平台能对上版本)
  *
- * @note 文档还要�切回 auto 时网关立即按当前水位重评估一次并刷新联动状�� —�� *       那属于边缘评�P3), 还没� 这里�TODO; 现阶段只改配置并如实应答� */
+ * @note 文档还要求"切回 auto 时立即按当前水位重评估一次并刷新联动状态"。
+ *       这件事由主循环的 manual 窗口回归负责(app_manual_step -> level_supervisor_force_next),
+ *       本命令只改配置并如实应答。
+ */
 int cloud_cmd_rule_mode(const cloud_req_t *req, cJSON *data)
 {
     char mode[12];
@@ -47,10 +50,10 @@ int cloud_cmd_rule_mode(const cloud_req_t *req, cJSON *data)
     }
     else
     {
-        return CLOUD_EC_PARAM;              /* 只认这两个�� 不猜 */
+        return CLOUD_EC_PARAM;              /* 只认这两个值，不猜 */
     }
 
-    /* manualTimeoutSeconds 可�� 文档�本次覆盖默认� */
+    /* manualTimeoutSeconds 可选；给了就覆盖本次的默认值 */
     if (cj_get(req->data, "manualTimeoutSeconds", NULL, 0u) != CJ_NOTFOUND)
     {
         uint32_t t = cj_get_uint(req->data, "manualTimeoutSeconds", 0u);
@@ -77,10 +80,14 @@ int cloud_cmd_rule_mode(const cloud_req_t *req, cJSON *data)
 }
 
 /**
- * @brief rule.query —��文档 5.5 �17 � *   响应 data: {"gears":[...], "rules":{mode, manualTimeoutSeconds, sensorOfflinePolicy}}
+ * @brief rule.query — 文档 5.5 第 17 条
+ *   响应 data: {"gears":[...], "rules":{mode, manualTimeoutSeconds, sensorOfflinePolicy}}
  *
- * 【实现取� 但刻意如此��直接复�config_store_write_members() �9 个域全写出来,
- * 再把这条命令【不该带】的 7 个域删掉 —��比在 cloud_proto.c 里把 gears/rules � * 字段表再抄一遍稳妥得� 抄一遍就意味睢�"以后改配置结构要改两�, 两处必然漂�� * 代价只是多建/多删几个节点(键序不变: gears �rules 之前)� */
+ * 【实现取巧但刻意如此】直接复用 config_store_write_members() 把 9 个域全写出来,
+ * 再把这条命令【不该带】的 7 个域删掉 —— 比在这里把 gears/rules 的字段表再抄一遍
+ * 稳妥得多: 抄一遍就意味着"以后改配置结构要改两处", 两处必然漂移。
+ * 代价只是多建/多删几个节点(键序不变: gears 在 rules 之前)。
+ */
 int cloud_cmd_rule_query(const cloud_req_t *req, cJSON *data)
 {
     static const char *const drop[] =
@@ -104,14 +111,17 @@ int cloud_cmd_rule_query(const cloud_req_t *req, cJSON *data)
 }
 
 /**
- * @brief rule.set —��文档 5.5 �16 � 设置联动档位动作(gears 数组, �gear 合并)
+ * @brief rule.set — 文档 5.5 第 16 条：设置联动档位动作(gears 数组, 按 gear 合并)
  *   响应: code 0 + data.configVersion
  *
  * 【实现为什么复用 config_store_merge_sections】gears 域的"按 gear 字段定位槽位"
- * 已经在那里实现并测过�单测 [12]: 给一�{gear:2,...} 只改 2 号档, 0 号档不动,
- * 而且槽位不变�gear[i]==i 仍成�。自己再抄一��gear 找槽�必然漂�� *
- * �只允许改 gears � *   这条命令的语义就�改档�。如果平台在 data 里顺手夹带了 thresholds 之类的域,
- *   必须【明确拒绝����不�只挑 gears 生效、其余静默忽� —��后��会让平台以� *   配置改成功了。所以先扫一遍已知域� 不是 gears 的出现了就回 1001� */
+ * 已经在那里实现并测过(单测 [12]): 给一个 {gear:2,...} 只改 2 号档, 0 号档不动,
+ * 而且槽位不变(gear[i]==i 仍成立)。自己再抄一份"按 gear 找槽位"必然漂移。
+ *
+ * 【只允许改 gears】这条命令的语义就是改档位。如果平台在 data 里顺手夹带了
+ * thresholds 之类的域, 必须【明确拒绝】—— 不能"只挑 gears 生效、其余静默忽略",
+ * 否则会让平台以为整份配置改成功了。所以先扫一遍已知域, 不是 gears 的出现了就回 1001。
+ */
 int cloud_cmd_rule_set(const cloud_req_t *req, cJSON *data)
 {
     cfg_sections_result_t res;
@@ -150,7 +160,7 @@ int cloud_cmd_rule_set(const cloud_req_t *req, cJSON *data)
     }
     if ((res.applied & CFG_CH_GEARS) == 0u)
     {
-        return CLOUD_EC_PARAM;              /* 被校验拒�/ 没生� 不假装成�*/
+        return CLOUD_EC_PARAM;              /* 被校验拒绝 / 没生效，不假装成功 */
     }
 
     rc = cloud_commit_config(&cloud_cfg_staging_buf);
