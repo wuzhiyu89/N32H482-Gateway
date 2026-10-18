@@ -67,18 +67,23 @@ int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data)
         {
             return CLOUD_EC_PARAM;
         }
-        /* 【本实现对两种模式的实际差别: 没有】����如实记档, 不假装有�         *   本工程的配置�丢�份结构体 + 立即�Flash", 运行期消费��阈��档位/规则)
-         *   每拍都直接读� 扢��
-         *     · immediate: 写完立即生效(与文档一�;
-         *     · reboot   : 文档意��是"重启后再生效", 但本实现【不延迟应用】����         *                  值现在就落到运行期结构里了��差别只体现在那�本来就要
-         *                  重启才生�的域�目前只有 network, �cfg.set 里那段说��         *   为什么不模拟 reboot: 那需要再存一�待生效副�并在启动时切� 对一�         *   单实例配置来说只会制�RAM �Flash 不一�的新隐患, 收益却只是让
-         *   应答更贴文档。已在本条目的台账里记为【有意差异����         *   ⚠️ 本函数��不会��因�reboot 就自行重� 重启由平台显式下�sys.reboot�*/
+        /* 【本实现对两种模式的实际差别: 没有】—— 如实记档, 不假装有。
+         *   本工程的配置是"一份结构体 + 立即落 Flash", 运行期消费方(阈值/档位/规则)
+         *   每拍都直接读它, 所以:
+         *     · immediate: 写完立即生效(与文档一致);
+         *     · reboot   : 文档原意是"重启后再生效", 但本实现【不延迟应用】——
+         *                  值现在就落到运行期结构里了, 差别只体现在那些本来就要
+         *                  重启才生效的域(目前只有 network, 见 cfg.set 里那段说明)。
+         *   为什么不模拟 reboot: 那需要再存一份待生效副本并在启动时切换, 对一份
+         *   单实例配置来说只会制造 RAM 与 Flash 不一致的新隐患, 收益却只是让
+         *   应答更贴文档。已在本条目的台账里记为【有意差异】。
+         *   ⚠️ 本函数【不会】因为 reboot 就自行重启: 重启由平台显式下发 sys.reboot。 */
         /* (只校验取值合法; 不再记住它 —— 用户决定不做回显) */
     }
 
     /* ---- data.sections(必填, 对象) ---- */
-    /* cj_get_sub 返回的是指向原报文内部的指针(零拷�, 不保�NUL 结尾;
-     * cloud_json 的路径解析是按括号配平走� 扢��子对象后面还有字�没关系��*/
+    /* cj_get_sub 返回的是指向原报文内部的指针(零拷贝, 不保证 NUL 结尾;
+     * cloud_json 的路径解析是按括号配平走的, 所以子对象后面还有字符也没关系)。 */
     sections = cj_get_sub(req->data, "sections");
     if (sections == NULL)
     {
@@ -132,16 +137,20 @@ int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data)
         }
     }
 
-    /* ---- network � 【接受�� 按文�重启生效" ----
-     * 文档 5.2 末原� "network 域修改后本网关重启生效，生效前旧连接保持"�     * 本工程的连接参数本来就是�config_store.network �—��main.c 弢�机时把它交给
-     * g4_at_set_broker()(弢�机日志那�"[BOOT] broker 来自配置 network: ..." 就是�,
-     * 而运行期【不会��热重连。所�写下�+ 重启生效 + 旧连接保�与文档完全一�
-     * 应答也不撒谎: 平台重启网关后连的就是新地址�     *
-     * ⚠️ 旧版本这里是�network 整域【拒掉��的, 理由�运行期读的是 param_save �     *    那一� —��那是 P2-7 统一之前的情况��现在读的就�config_store, 扢�以改判��     * ⚠️ 唯一必须守住的一� 【不要��在运行期热改连接参�—��那会打断正在跑的业务
-     *    连接, 而文档明确要�生效前旧连接保持"。所以本函数丢�行都不碰 g4_at�*/
+    /* ---- network 域: 【接受】"按文档重启生效" ----
+     * 文档 5.2 末尾: "network 域修改后本网关重启生效，生效前旧连接保持"。
+     * 本工程的连接参数本来就是从 config_store.network 读 —— main.c 开机时把它交给
+     * g4_at_set_broker()(开机日志那行 "[BOOT] broker 来自配置 network: ..." 就是它),
+     * 而运行期【不会】热重连。所以"写下去 + 重启生效 + 旧连接保持"与文档完全一致,
+     * 应答也不撒谎: 平台重启网关后连的就是新地址。
+     *
+     * ⚠️ 旧版本这里是把 network 整域【拒掉】的, 理由是"运行期读的是 param_save
+     *    那一份" —— 那是 P2-7 统一之前的情况; 现在读的就是 config_store, 所以改判。
+     * ⚠️ 唯一必须守住的一条: 【不要】在运行期热改连接参数 —— 那会打断正在跑的业务
+     *    连接, 而文档明确要求"生效前旧连接保持"。所以本函数一行都不碰 g4_at。 */
     if ((res.applied & CFG_CH_NETWORK) != 0u)
     {
-        log_info("[CFG] cfg.set 改了 network �-> 已落� 【重启后生效�当前连接不受影响)\r\n");
+        log_info("[CFG] cfg.set 改了 network 域 -> 已落盘(重启后生效, 当前连接不受影响)\r\n");
     }
 
     /* ---- 有域生效才 +1 版本并落 Flash; 全部被拒时版本不动、Flash 不动 ---- */
@@ -232,7 +241,8 @@ int cloud_cmd_cfg_query(const cloud_req_t *req, cJSON *data)
         }
     }
 
-    /* �rule.query / sen.query 同一套办� 全写出来再删掉不要的�—��     * 这样字段名与键序永远与写入器同源, 不会漂��*/
+    /* 与 rule.query / sen.query 同一套办法: 全写出来再删掉不要的 ——
+     * 这样字段名与键序永远与写入器同源, 不会漂移。 */
     for (i = 0u; i < (uint8_t)CLOUD_CFG_SECTION_N; i++)
     {
         if ((mask & (uint16_t)(1u << i)) == 0u)
@@ -243,7 +253,9 @@ int cloud_cmd_cfg_query(const cloud_req_t *req, cJSON *data)
     return CLOUD_EC_OK;
 }
 
-/* 恢复出厂的工作副�+ 霢�要保留下来的 network 域�� * 都必须是文件�static: config_store_t ~1.7KB, �4KB 的栈上会� * (startup_n32h47x_48x.s �Stack_Size)。本工程是单线程轮询, 不会重入�*/
+/* 恢复出厂的工作副本 + 需要保留下来的 network 域。
+ * 都必须是文件级 static: config_store_t 约 1.7KB, 放 4KB 的栈上会爆
+ * (startup_n32h47x_48x.s 的 Stack_Size)。本工程是单线程轮询, 不会重入。 */
 static config_store_t s_cfg_reset_tmp;
 static cfg_network_t  s_keep_network;
 
@@ -252,7 +264,7 @@ int cloud_cmd_sys_factory_reset(const cloud_req_t *req, cJSON *data)
     bool         keep_network = true;       /* 文档默认值 true */
     cfg_result_t r;
 
-    /* ---- data.keepNetwork(bool, 可�� 默认 true) ---- */
+    /* ---- data.keepNetwork(bool, 可选, 默认 true) ---- */
     if (req->data != NULL)
     {
         cj_type_t t = cj_get(req->data, "keepNetwork", NULL, 0u);
@@ -272,14 +284,17 @@ int cloud_cmd_sys_factory_reset(const cloud_req_t *req, cJSON *data)
     if (!keep_network)
     {
         /* 不保留 network: 直接用现成的 config_store_reset()
-         * (= 填出厂默�+ updatedAt + �Flash), 与文�其余配置域恢复出厂默�
-         * network 也一起回默认"完全丢�� 不必自己再拼丢�份��*/
+         * (= 填出厂默认 + updatedAt + 落 Flash), 与文档其余配置域恢复出厂默认一致;
+         * network 也一起回默认"完全丢配置", 不必自己再拼一份。 */
         r = config_store_reset(&s_cfg_reset_tmp, cloud_proto_get_now_ts());
     }
     else
     {
-        /* 【保�network 时为仢�么不能也�config_store_reset()�         * 它就�先填默认再落�, 会把 network 丢�起清� 若先 reset 再回�network
-         * 并二次落� Flash 就会经历丢��network 被清�的中间��—��         * 那两次写盘之间掉� 网关恢复出厂后连不上 broker, 现场无法远程救回�         * 扢�以改� 填出厂默�-> 回填 network -> 【一次��写盘��*/
+        /* 【保留 network 时为什么不能也用 config_store_reset()】
+         * 它是"先填默认再落盘", 会把 network 一起清掉; 若先 reset 再回填 network
+         * 并二次落盘, Flash 就会经历一次"network 被清空"的中间态 —— 那两次写盘之间
+         * 掉电, 网关恢复出厂后连不上 broker, 现场无法远程救回。
+         * 所以改为: 填出厂默认 -> 回填 network -> 【一次】写盘。 */
         const config_store_t *cur = config_store_get();
 
         s_keep_network = cur->network;              /* 先把要保留的域拷出来 */
@@ -291,8 +306,8 @@ int cloud_cmd_sys_factory_reset(const cloud_req_t *req, cJSON *data)
 
     if (r != CFG_OK)
     {
-        /* 落盘失败 -> 1007, 且��内存里的当前配置一个字都不动��
-         * 这样 RAM �Flash 不会出现"丢�个变了��一个没�的分裂状态��*/
+        /* 落盘失败 -> 1007, 且让内存里的当前配置一个字都不动。
+         * 这样 RAM 与 Flash 不会出现"一个变了、一个没变"的分裂状态。 */
         log_info("[CLOUD] !! sys.factory_reset 落 Flash 失败(code=%d), 回 1007, 当前配置未改动\r\n",
                  (int)r);
         return CLOUD_EC_INTERNAL;
@@ -324,7 +339,7 @@ int cloud_cmd_sys_factory_reset(const cloud_req_t *req, cJSON *data)
     log_info("[CLOUD] sys.factory_reset: cloud_profile 已一并回出厂默认(broker/gwId/clientID)\r\n");
 
     log_info("[CLOUD] sys.factory_reset 完成: keepNetwork=%s, configVersion=0, "
-             "sensors=%u � devices=%u � 其余域已回出厂默认\r\n",
+              "sensors=%u devices=%u 其余域已回出厂默认\r\n",
              keep_network ? "true" : "false",
              (unsigned)config_store_get()->sensor_count,
              (unsigned)config_store_get()->device_count);
