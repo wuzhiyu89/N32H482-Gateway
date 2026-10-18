@@ -82,7 +82,13 @@
 | `app/common` | `utils` / `storage` / `flash_map` / `ring_buf` | CRC16/CRC32、UTF-8 工具、Flash 读写、分区地址、环形缓冲 | 无状态 |
 | `app/drivers/lora` | `llcc68.c` / `radio.c` / `LLCC68N32H482-board.c` / `project_config.h` | 芯片寄存器、收发中断、引脚、**编译期模式开关** | 不懂帧格式 |
 | `app/links/lora` | `lora_proto.c` | 帧编解码、CRC、连续接收守护、诊断 `#lora` | 不管从机业务 |
-| | `lora_business.c` | 从机表、绑定/解绑/声光状态机、下发队列、字段读写、MQTT 桥 | 不组云 JSON |
+| | `lora_slave.c` | 从机表：hex 工具、装载、增删、在线状态 | 不决定"何时绑/解" |
+| | `lora_bind.c` | 0x04 绑定窗口状态机 + 写配置 | 不管解绑/下发 |
+| | `lora_unbind.c` | 0x05 解绑两阶段状态机 | 不管绑定/下发 |
+| | `lora_alarm.c` | 0x03 执行结果状态机（0x82/0x83）+ 档位下发 | 不组云 JSON |
+| | `lora_downlink.c` | 下发队列、ACK 重传、两步错开应答、MQTT 下行 | 不解释业务语义（0x03 除外，交给 alarm） |
+| | `lora_field.c` | 出厂字段 0x06/0x07/0x08 本地状态机 | 不上云 |
+| | `lora_business.c` | 帧分发、0x02 上报、失联检测、init/poll | 不维护表结构、不管绑定/下发细节 |
 | `app/links/g4` | `g4_io.c` | USART2 传输 + AT 命令引擎（非阻塞） | 不懂 MQTT 语义 |
 | | `g4_urc.c` | URC 解析、MQTT 下行队列、puback 计数 | 不建链 |
 | | `g4_at.c` | 建链状态机、发布子流程、断链恢复、诊断命令 | 不管业务 |
@@ -252,7 +258,11 @@ powershell -ExecutionPolicy Bypass -File tools\verify.ps1
 - [x] `g4_at.c`：`g4_at_poll()` **1384 → 221 行**，25 个状态各拆成 `g4_st_*()`，
       状态迁移仍统一走 `g4_goto_state()`；`test_state` 35/35 通过
 - [x] `cloud_proto.c` 拆分完成：3,576 → 1,049 行。上行构造 → `cloud_uplink.c`；命令按域 → `cloud_cmd_{sys,ota,cfg,rule,devices}.c`；只剩信封/幂等/分发表/日历/暂存缓冲
-- [x] `lora_business.c` 拆分（进行中）：出厂字段状态机 → `lora_field.c`（配合 `lora_internal.h`）；其余（从机表/绑定/解绑/声光/下发）待拆
+- [x] `lora_business.c` 拆分完成：**3,012 → 634 行**。按职责分成
+      `lora_slave.c`（从机表）、`lora_bind.c`（0x04）、`lora_unbind.c`（0x05）、
+      `lora_alarm.c`（0x03 结果机 + 档位）、`lora_downlink.c`（下发队列/MQTT 下行）；
+      交叉引用只在 `lora_internal.h`，`on_frame` 通过 `lora_bind_*` / `lora_unbind_*`
+      访问器判断归属（不暴露状态结构）。已归档 `lora_field.c`（出厂字段）
 - [ ] 切断 `cloud ↔ lora_business` 双向依赖
 - [x] 编译期开关全部收敛到 pp/core/app_config.h（main.c 已无 #define MAIN_*；仍全部 #ifndef，Keil Define 可覆盖）
 - [x] 两套 JSON 的边界已成文（docs/JSON.md）：解析用 `cloud_json`（零堆），构造/打印用 `cJSON` + 静态池；**不做合并**（合并会丢其中一边的内存特性）

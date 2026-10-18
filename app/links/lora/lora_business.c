@@ -1,36 +1,28 @@
 /**
  * \file  lora_business.c
- * \brief LoRa 业务层 —— 从机表 + 帧分发 + ACK 重传 + data_cache + MQTT 下行
+ * \brief LoRa 业务层入口 —— 帧分发 / 0x02 上报 / 失联检测 / init / poll
  *
- * 本模块吸收了原 local_gateway.c 的全部业务逻辑:
- *   - lora_gateway_find_slave_by_uid → lora_slave_find (★ 从机表为动态表, 从
- *     config_store 的 sensors[]/devices[] 装载, 运行期支持 0x04 绑定/0x05 解绑)
- *   - lora_gateway_handle_up_frame → on_frame (协议层已做 CRC, 只做业务分发)
- *   - lora_gateway_handle_down_logic → lora_downlink_logic (ACK 超时重传)
- *   - lora_gateway_send_req → lora_business_send_req (存 data_cache)
- *   - uart_send_bytes(USART2, ...) → lora_proto_send_frame()
- *   - 自己实现的 parse_frame → 删除(协议层 lora_proto_poll 统一做)
- *   - 自己维护的 rb_lora → 删除(协议层内部单缓冲)
+ * 2026-10-18 拆分后，links/lora 下按职责分文件（跨文件接口见 lora_internal.h）：
+ *   lora_slave.c     从机表：hex 工具 / 装载 / 增删 / 在线状态
+ *   lora_bind.c      0x04 绑定窗口状态机
+ *   lora_unbind.c    0x05 解绑两阶段状态机
+ *   lora_alarm.c     0x03 执行结果状态机 + 档位联动下发
+ *   lora_downlink.c  下发队列：投递 / 空口发送 / ACK 重传 / MQTT 下行
+ *   lora_field.c     出厂字段 0x06 / 0x07 / 0x08
+ *   lora_proto.c     帧编解码 / CRC / 射频收发
+ *   本文件保留：on_frame 分发、0x02 上报处理、失联检测、0x80~0x83 应答分发、
+ *                init / poll、射频健康状态。
  *
- * MQTT 对接(2026-09 改版: 【不再用 JSON】):
- *   g4_urc_set_recv_cb(lora_mqtt_recv_cb) 注册回调 —— 全模块唯一的下行入口
- *   下行 payload: 【一整个协议帧的原始二进制】(AA 55 开头, 含 CRC), 例如
+ * 历史：本文件吸收了原 local_gateway.c 的全部业务逻辑（从机表、ACK 重传、
+ * 指令排队、MQTT 上下行），2026-10 起按上面的分工逐步拆开。
+ *
+ * 下行 payload 约定（2026-09 改版：不再用 JSON）：
+ *   云端直接下发【一整个协议帧的原始二进制】(AA 55 ... CRC)，例如
  *       AA 55 01 11 00 01 21 00 01 01 07 05 00 0A 00 00 DC 05 98 E0
- *     ⚠️【2026-09 更正 —— 这一处原来写的 CRC 是 38 1B, 是错的】
- *        正确算法: crc16_modbus 覆盖【版本字节 .. data 末尾】共 16 字节,
- *        结果低字节在前。crc16_modbus(01 11 00 01 21 00 01 01 07 05 00
- *        0A 00 00 DC 05) = 0xE098 -> 帧尾写 98 E0。
- *        写成 38 1B 时液位设备端 CRC 校验不过, 会回 "CRC error" 丢弃整帧
- *        (设备日志: [cmd] CRC error: expect 98 E0, got 38 1B)。
- *        工具自检: crc16_modbus("123456789") 必须 = 0x4B37。
- *     校验 lora_proto_parse_raw()(帧头/版本/长度/CRC) → 转发到空口。
- *     同时保留旧格式 ASCII hex 文本的兼容分支(不以 AA55 开头才走 hex 解码)。
- *   上行 payload: 协议帧的 ASCII hex 文本(lora_business_publish_report) ——
- *     上行仍是 hex 文本, 这一条没变(云端按文本收)。
- *
- *   【台架联调开关 LORA_DOWNLINK_RAW_FORWARD】(见 lora_mqtt_recv_cb 上方)
- *     1 = 粗略直转: 校验通过就原样发到空口(不校时/不解释 func);
- *     0 = 走原业务解释(0x01 需要 4G 校时, 0x03 立即下发)。
+ *   ⚠️ 这一处原来写的 CRC 是 38 1B，是错的：CRC 覆盖"版本字节..data 末尾"、
+ *      低字节在前，正确值是 98 E0（crc16_modbus("123456789") 必须 = 0x4B37）。
+ *   收包与校验在 lora_downlink.c 的 lora_mqtt_recv_cb()；旧格式 ASCII hex
+ *   文本保留兼容分支（不以 AA55 开头才走 hex 解码）。
  */
 #include <stdint.h>
 #include <stdbool.h>
@@ -62,8 +54,9 @@ _Static_assert(CFG_UID_BYTES == LORA_UID_BYTES,
 #include "bsp_tim.h"
 #include "log.h"
 
-/* 从机表(g_slave_list / g_slave_count)已拆到 lora_slave.c，
- * 接口见 lora_internal.h。本文件只做帧分发 / 绑定解绑 / 下发，不再维护表结构。 */
+/* 从机表(g_slave_list / g_slave_count)在 lora_slave.c，绑定/解绑/下发分别在
+ * lora_bind.c / lora_unbind.c / lora_downlink.c，接口见 lora_internal.h。
+ * 本文件只做帧分发、上行业务、失联检测与 init/poll。 */
 static uint32_t g_last_poll_tick;
 /* 网关 UID 在 lora_business_init 里从 param_save 读入 (支持后续本地/云端修改) */
 uint8_t g_gw_uid[CFG_UID_BYTES];

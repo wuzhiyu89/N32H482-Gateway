@@ -187,7 +187,7 @@ void lora_downlink_logic(void)
         /* 【解绑(0x05)的 slave 由 g_unbind 状态机独立驱动, 不走这里的重传逻辑】
          *   g_unbind 启动时把目标 slave 置 WAIT_ACK+pending_func=0x05 当"锁",
          *   防止 lora_try_send_downlink / 本函数干扰; 这里直接 continue 跳过,
-         *   发送/重发/超时/阶段切换全由 _unbind_logic() + _unbind_on_ack() 处理。
+         *   发送/重发/超时/阶段切换全由 lora_unbind_logic() + lora_unbind_on_ack() 处理。
          *   (2026-09-30 改造: 原来走的 5s/3 次耗尽强制删路径与用户最终两阶段口径
          *   冲突, 已作废; 详见 g_unbind 上方注释) */
         if (s->pending_func == LORA_FUNC_UNBIND) continue;

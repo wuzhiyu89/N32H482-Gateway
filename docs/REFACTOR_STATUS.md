@@ -37,14 +37,25 @@
 | `g4_at_poll()` 单函数 | 1,384 | **221**（25 个 `g4_st_*`） |
 | `cloud_proto.c` | 3,576 | **1,049** |
 | `app_uplink.c` | 1,491 | **830** |
-| `lora_business.c` | 2,950 | **2,690**（字段状态机已拆出） |
+| `lora_business.c` | 3,012 | **634**（拆出 5 个文件，见下） |
 
 新增的编排单元：`app/core/{app_boot,app_loop,app_state,app_config,app_console,app_downlink,app_uplink,app_events,app_level,app_modes}.c`。
 
 云协议按域拆：`cloud_uplink.c`、`cloud_cmd_{sys,cfg,rule,devices,ota}.c`，
 共享接口集中在 `cloud_internal.h`（暂存缓冲 / commit / section 表 / 打印）。
 
-LoRa 侧新增 `lora_internal.h`，`lora_field.c` 独立。
+LoRa 侧 2026-10-18 继续拆分（`lora_internal.h` 集中内部接口）：
+
+| 文件 | 职责 |
+|---|---|
+| `lora_slave.c` | 从机表：hex 工具、装载、增删、在线状态 |
+| `lora_bind.c` | 0x04 绑定窗口状态机 + 写配置 |
+| `lora_unbind.c` | 0x05 解绑两阶段状态机 |
+| `lora_alarm.c` | 0x03 执行结果状态机 + 档位联动下发 |
+| `lora_downlink.c` | 下发队列 / ACK 重传 / 两步应答 / MQTT 下行 |
+| `lora_business.c` | 帧分发、0x02 上报、失联检测、init / poll |
+
+`lora_field.c` 之前已拆出（出厂字段）。
 
 ### 5. 文档与约定
 
@@ -70,16 +81,19 @@ LoRa 侧新增 `lora_internal.h`，`lora_field.c` 独立。
 
 ## 二、未完成
 
-1. `lora_business.c`（2,690 行）继续拆：从机表 / 绑定 / 解绑 / 声光 / 下发队列；
-2. `config_store.c`（2,283 行）按 9 个配置域拆解析/序列化；
-3. **板上冒烟测试**（唯一未做的验证）：
+1. `config_store.c`（2,283 行）按 9 个配置域拆解析/序列化；
+2. **板上冒烟测试**（唯一未做的验证）：
    - 开机横幅 → `进入主循环`；
    - `===== MQTT ONLINE! =====` + 一条 `status.report 已发`；
    - 液位发一帧，确认 `[LoRa RX]` / `[LEVEL]`；
    - 产线流程 `#bind` → `#set` → `#get`。
 
-> 主机测试覆盖不到 `main.c` / `app/core` / `lora_business.c`（后者在测试里是替身）。
+> 主机测试覆盖不到 `main.c` / `app/core` / `app/links/lora`（`lora_business` 在测试里是替身）。
 > 这几块的结构改动只有构建与人工核对兜底，所以板上冒烟是必要的一步。
+> 本次 LoRa 拆分的额外核对：用脚本把拆分前 `lora_business.c` 的 **66 个函数逐个
+> 与拆分后比对**（只允许改 `static` 与跨文件改名），结果 0 处差异；
+> 只有 `on_frame` / `handle_ack_from_device` 两处是**有意**把"直接读 `g_bind`/`g_unbind`"
+> 换成 `lora_bind_*` / `lora_unbind_*` 访问器。
 
 ## 三、坏注释修复的做法（踩坑后固化）
 

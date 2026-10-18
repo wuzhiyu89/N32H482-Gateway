@@ -25,14 +25,14 @@
 #include "log.h"
 
 /* ==================== ★2026-10-08 声光(0x03)执行结果状态机的公共定义 ====================
- * 放在 _transmit_downlink 之前: 它是发送咽喉, 每次真的发出去都要记账。
+ * 放在 lora_tx_downlink 之前: 它是发送咽喉, 每次真的发出去都要记账。
  * 状态机主体在下面 handle_ack_from_device 之前(见 lora_alarm_on_fail)。 */
 #define LORA_ALARM_TIMEOUT_MS   15000u   /* 单条 0x03 等 0x82/0x83 的窗口(用户指定 15s) */
 #define LORA_ALARM_MAX_ATTEMPTS 3u       /* 单条动作最多发几条(用户指定 3 条) */
 #define LORA_ALARM_RETRY_GAP_MS 500u     /* 重发前的最小间隔(给设备射频恢复时间) */
 
 /* 正在下发的这条动作是哪个档位。
- * 【为什么要这个全局】_transmit_downlink 只知道 slave(uid/func/data), 不知道档位 ——
+ * 【为什么要这个全局】lora_tx_downlink 只知道 slave(uid/func/data), 不知道档位 ——
  *   档位只存在于 gears[] 的索引里, 不在空口载荷里。而上报 event.action 需要它。
  *   单线程 + 一条指令从入队到发出只隔最多一个 poll 周期, 所以这里存一份是安全的。
  *   (由 lora_business_apply_gear_ex() 在入队时写。) */
@@ -70,16 +70,16 @@ void lora_alarm_fire_result(const lora_slave_t *s, bool ok, bool gave_up,
  * 【为什么重发是"重新走一遍下发"而不是"重发同一串字节"】
  *   0x82/0x83 是【设备执行完】的结论, 重发同一帧是没意义的(设备已经执行过了);
  *   真正要做的是把这条业务动作【再试一次】。所以这里回到 IDLE + 保留下发缓存,
- *   由 _try_send_alarm_idle() 捡起来重发 —— 与既有的重发路径完全一致。
+ *   由 lora_try_send_alarm_idle() 捡起来重发 —— 与既有的重发路径完全一致。
  *
  * 【为什么清 alarm_pending 但保留 attempts】
  *   attempts 是"这一轮动作已经试了几条", 跨重发保留; alarm_pending 表示
- *   "正在等结果", 清掉后 _handle_down_logic 就不会再对它判超时。
+ *   "正在等结果", 清掉后 lora_downlink_logic 就不会再对它判超时。
  */
 void lora_alarm_on_fail(lora_slave_t *s)
 {
     s->alarm_pending = false;
-    s->state         = SLAVE_STATE_IDLE;    /* 让 _try_send_alarm_idle 能再捡起来 */
+    s->state         = SLAVE_STATE_IDLE;    /* 让 lora_try_send_alarm_idle 能再捡起来 */
     s->retry_cnt     = 0U;                  /* 帧级重传计数与业务重试无关, 一并归零 */
 
     if (s->alarm_attempts >= LORA_ALARM_MAX_ATTEMPTS)
@@ -96,7 +96,7 @@ void lora_alarm_on_fail(lora_slave_t *s)
         return;
     }
 
-    /* 还有配额: 记一次"这一条失败了", 等 _try_send_alarm_idle 重发 */
+    /* 还有配额: 记一次"这一条失败了", 等 lora_try_send_alarm_idle 重发 */
     s->send_req_tick = get_tick_ms() - (LORA_ALARM_TIMEOUT_MS - LORA_ALARM_RETRY_GAP_MS);
     log_info("[GEAR] %02X%02X%02X 本条失败, 准备重发(已发 %u/%u)\r\n",
              s->dev_uid[0], s->dev_uid[1], s->dev_uid[2],
@@ -122,15 +122,15 @@ void lora_alarm_on_fail(lora_slave_t *s)
  *
  * 【复用了什么(没另造轮子)】
  *   lora_business_send_req() —— 已有的"投递到下发缓存"入口: 负责找从机 ->
- *   写 pending_func/pending_data -> 由 poll 里的 _try_send_alarm_idle()(联动设备
- *   常驻 RX, 立即发) / _handle_down_logic()(5s 超时重发、最多 4 次、耗尽丢弃)
+ *   写 pending_func/pending_data -> 由 poll 里的 lora_try_send_alarm_idle()(联动设备
+ *   常驻 RX, 立即发) / lora_downlink_logic()(5s 超时重发、最多 4 次、耗尽丢弃)
  *   完成发送与 ACK 跟踪。所以 ACK、重试、窗口适配一行都不用重写。
  *
  * 【时序为什么要守】(网关液位lora规则.txt, 液位侧口径)
  *   液位上报后【立即开 5s 接收窗口】等主机 ack; 收到 ack 再开【10s 窗口】收云端
  *   控制指令; 收到指令后回【两遍 ack(间隔 3s)】再休眠。
  *   -> 本条链只对【联动设备】(常驻 RX, 随时可发), 不涉及液位窗口; 液位那侧的下发
- *      仍走 _reply_logic() 的 3s+3s 两步错开(落在 5s/10s 窗口内)。
+ *      仍走 lora_reply_logic() 的 3s+3s 两步错开(落在 5s/10s 窗口内)。
  *      设备回的第二遍 ack 会落在 state=IDLE, handle_ack_from_device() 直接忽略
  *      (不是等 ACK 状态) —— 这是安全的, 不需要特判。
  * ========================================================================== */
@@ -261,7 +261,7 @@ int lora_business_apply_gear_ex(uint8_t gear, const char *only_uid,
             else
             {
                 /* ★2026-10-08: 记下这条动作的档位★
-                 * _transmit_downlink 只知道 uid/func/data, 不知道档位(档位不在空口载荷里),
+                 * lora_tx_downlink 只知道 uid/func/data, 不知道档位(档位不在空口载荷里),
                  * 而上报 event.action 需要它。单线程 + 入队到发出只隔一个 poll 周期, 安全。 */
                 g_alarm_gear_inflight = gear;
 

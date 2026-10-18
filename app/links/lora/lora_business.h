@@ -1,28 +1,32 @@
 /**
  * \file  lora_business.h
- * \brief LoRa 业务层 —— 从机表管理 + 帧分发 + data_cache + MQTT 下行对接
+ * \brief LoRa 业务层对外接口
  *
- * 分层:
- *   lora_proto.c   —— radio 收发 + 帧编解码 + CRC16 (协议层)
- *   lora_business.c —— 从机表 + ACK 重传 + 指令排队 + MQTT 上下行 (业务层)
- *   data_cache.c    —— 上行/下发缓存 (独立)
- *   g4_at.c         —— 4G MQTT 收发 (独立)
+ * 分层（2026-10-18 拆分后，实现按职责分文件）:
+ *   lora_proto.c     —— radio 收发 + 帧编解码 + CRC16 (协议层)
+ *   lora_slave.c     —— 从机表（hex 工具 / 装载 / 增删 / 在线状态）
+ *   lora_bind.c      —— 0x04 绑定窗口状态机
+ *   lora_unbind.c    —— 0x05 解绑两阶段状态机
+ *   lora_alarm.c     —— 0x03 执行结果状态机 + 档位联动下发
+ *   lora_downlink.c  —— 下发队列（投递 / 空口发送 / ACK 重传 / MQTT 下行）
+ *   lora_field.c     —— 出厂字段 0x06/0x07/0x08
+ *   lora_business.c  —— 帧分发 / 0x02 上报 / 失联检测 / init / poll
+ *   data_cache.c     —— 上行/下发缓存 (独立)
+ *   g4_at.c          —— 4G MQTT 收发 (独立)
+ *
+ * 跨文件的内部接口在 lora_internal.h，不对外。
  *
  * 数据流:
  *   LoRa上行 → radio RxDone → lora_proto_poll → parse → on_frame(func分发)
  *     ├─ 0x02 sensor_report → data_cache_up_push + ACK(0x80)
  *     ├─ 0x80 ACK_OK        → data_cache_down_del_by_uid(state=IDLE)
  *     ├─ 0x81 ACK_ERR       → state=IDLE 等下次重试
+ *     ├─ 0x82/0x83          → 声光执行结果（lora_alarm.c）
  *     └─ 其他               → ...
  *
- *   MQTT下行 → g4_urc URC → lora_mqtt_recv_cb → hex解帧+校验 → data_cache_down_push
- *   LoRa下发 → lora_business_poll → _reply_logic / _try_send_alarm_idle
+ *   MQTT下行 → g4_urc URC → lora_mqtt_recv_cb → 校验/解帧 → data_cache_down_push
+ *   LoRa下发 → lora_business_poll → lora_reply_logic / lora_try_send_alarm_idle
  *               对每台 SLAVE_STATE_IDLE 从机: fetch_by_uid → lora_proto_send_frame → state=WAIT_ACK
- *
- *   MQTT上行 → lora_business_publish_report → 组帧 → hex → g4_at_mqtt_publish
- *
- * 本模块吸收了原 local_gateway.c 的全部业务逻辑(从机表/ACK重传/指令排队),
- * 取代 local_gateway.c 和 lora_business.c 两个文件。
  */
 #ifndef __LORA_BUSINESS_H__
 #define __LORA_BUSINESS_H__
@@ -122,7 +126,7 @@ typedef struct
     uint32_t           alarm_tick;        /* 本条发出的时刻(判 15 秒超时) */
 
     /* ★2026-10-18 (丙): 这台声光是否【已经报过"离线"】且还没恢复 ★
-     *   置 true  : _alarm_on_fail() 里 3 条配额用完、判定它离线的那一刻;
+     *   置 true  : lora_alarm_on_fail() 里 3 条配额用完、判定它离线的那一刻;
      *   清 false : 收到 0x82 执行成功时(并在那一次回调里带 recovered=true,
      *              让主程序补一条 event.device{"online"})。
      * 【为什么要这个位】原来只有失败那一次发 event.device{"offline"},
@@ -630,7 +634,7 @@ uint8_t lora_business_radio_busy(void);
  *        旧版是"分钟"(网关原样转发分钟, 设备端自己 ×60 换内部秒)——
  *        两版【不兼容】, 网关与设备必须同一次改版, 否则时间差 60 倍。
  *        另注: 现在取不到 4G 时间【不再直接丢弃】, 而是校时先填 0 并告警 ——
- *        真正发出去之前 _try_send_downlink() 会再取一次刷新(见 .c 的说明)。
+ *        真正发出去之前 lora_try_send_downlink() 会再取一次刷新(见 .c 的说明)。
  *   0x03(设置声光报警器): 一个字节都不改, 直接透传。
  *   0x80/0x81: 云端对我方上报的应答, 只记日志。
  *
