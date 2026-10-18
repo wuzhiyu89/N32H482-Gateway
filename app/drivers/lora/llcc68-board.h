@@ -32,7 +32,7 @@ extern "C"
 #include <stdbool.h>
 #include "llcc68.h"
 
-//������˳��ٽ�����������
+// 临界区宏：有 OS 时用 RTOS 的进入/退出，裸机下为空
 #if HAVE_OS
 	#define CRITICAL_SECTION_BEGIN( )	vPortEnterCritical()
 	#define CRITICAL_SECTION_END( )	vPortExitCritical()
@@ -109,7 +109,7 @@ bool LLCC68CheckRfFrequency( uint32_t frequency );
 void LLCC68DelayMs(uint32_t ms);
 
 /*
- * ��ʱ����ʼ�� 
+ * 定时器初始化（TX/RX 超时用的硬件定时器）
  */
 void LLCC68TimerInit(void);
 void LLCC68SetTxTimerValue(uint32_t nMs);

@@ -583,7 +583,7 @@ LLCC68_t LLCC68;
  */
 static RadioOperatingModes_t OperatingMode;
 
-//------------------------ board code start �� board �ƶ������Ĵ��� -----------------
+//------------------------ board code start：与板级相关的代码 -----------------
 RadioOperatingModes_t LLCC68GetOperatingMode( void )
 {
     return OperatingMode;
@@ -605,18 +605,18 @@ uint32_t LLCC68GetBoardTcxoWakeupTime( void )
 }
 
 
-//����DIO2λRF���ƽ�
+//配置 DIO2 为 RF 开关控制引脚
 void LLCC68IoRfSwitchInit( void )
 {
     LLCC68SetDio2AsRfSwitchCtrl( true );
 }
 
-//�����������ڲ��Զ����ƣ�����ר������
+//打开天线开关（本板没有专用控制脚，空实现）
 void LLCC68AntSwOn( void )
 {
     //GpioInit( &AntPow, RADIO_ANT_SWITCH_POWER, PIN_OUTPUT, PIN_PUSH_PULL, PIN_PULL_UP, 1 );
 }
-//�����������ڲ��Զ����ƣ�����ר������
+//关闭天线开关（本板没有专用控制脚，空实现）
 void LLCC68AntSwOff( void )
 {
     //GpioInit( &AntPow, RADIO_ANT_SWITCH_POWER, PIN_ANALOGIC, PIN_PUSH_PULL, PIN_NO_PULL, 0 );
