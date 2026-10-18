@@ -104,13 +104,13 @@
 | | `ota_port.c` | 分区擦写、续传记录、标记页 | — |
 | | `ota_health.c` | A/B 槽的机会计数与回滚判定 | 不执行搬运 |
 | | `md5.c` | 增量 MD5 | — |
-| `src/main.c` | | 启动序列、主循环 | 已只留"编排"，业务都在 app/core/* |
-| `app/core` | `app_state` / `app_console` / `app_downlink` / `app_uplink` / `app_modes` | 编排层：共享状态、日志口、下行路由、上行业务、工程模式 | 不含协议/驱动细节 |
+| `src/main.c` | | **只做模式分发**（30 行） | 不再放业务逻辑 |
+| `app/core` | `app_boot` / `app_loop` / `app_state` / `app_console` / `app_downlink` / `app_uplink` / `app_modes` | 编排层：启动序列、主循环、共享状态、日志口、下行路由、上行业务、工程模式 | 不含协议/驱动细节 |
 | `app/core/app_config.h` | | 编译期开关与少量编译期参数的**唯一默认值源** | 不放可调参数（进 config_store） |
 
 ---
 
-## 5. 启动流程（`main()`）
+## 5. 启动流程（`app/core/app_boot.c` → `app_boot_run()`）
 
 顺序是**有意**的，不要随意调整：
 
@@ -128,7 +128,7 @@
 
 > 判断"死在哪一步"：串口最后一行 `[BOOT] ...` 就是现场证据。
 
-## 6. 主循环节拍
+## 6. 主循环节拍（`app/core/app_loop.c` → `app_loop_run()`）
 
 | 周期 | 做什么 | 为什么是这个周期 |
 |---|---|---|
@@ -240,14 +240,15 @@ powershell -ExecutionPolicy Bypass -File tools\verify.ps1
 
 - [x] 死代码归档（USB Host、bootloader、旧 MQTT OTA、json_proto）
 - [x] 目录按层重排（drivers / links / cloud / model / service）
-- [x] `main.c` 第一轮拆分：`main.c` **4309 → 1096 行**
+- [x] `main.c` 拆分完成：`main.c` **4309 → 340 行**（只剩开关 + 模式分发）
+      - 启动序列 → `app_boot.c`（`app_boot_run()`）
+      - 主循环 → `app_loop.c`（`app_loop_run()`）
       - 控制台 / 周期状态 / 复位原因 → `app_console.c`
       - 下行路由 → `app_downlink.c`
       - 上报（status/telemetry/event/ota.progress/补报）→ `app_uplink.c`
       - 共享状态（时钟/最近档位）→ `app_state.c`
       - 两种工程模式 → `app_modes.c`
-      - 开关默认值 → `app_config.h`
-- [ ] `main.c` 最后一轮：把"启动序列"与"主循环"拆成 `app_boot.c` + 循环函数
+      - 开关与节拍常量 → `app_config.h`
 - [ ] `g4_at.c` 拆分：`g4_at_poll()` 一个函数 1384 行 → 按状态拆
 - [ ] `cloud_proto.c` 拆分：21 条命令按域拆文件
 - [ ] `lora_business.c` 拆分：从机表 / 绑定 / 解绑 / 声光 / 字段 / 下行
