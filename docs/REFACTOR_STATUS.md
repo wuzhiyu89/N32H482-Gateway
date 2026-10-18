@@ -85,3 +85,24 @@ LoRa 侧新增 `lora_internal.h`，`lora_field.c` 独立。
 2. **只重写注释块**，代码行原样保留（逐字节比对）；
 3. 每个文件处理完立即构建 + 跑 1840 条断言；
 4. 一次只提交一个文件，出问题 `git checkout -- <file>` 即时回滚。
+## 四、硬件验证记录（2026-10-18，J-Link + COM14）
+
+烧录方式：JLink.exe -device N32H482RE -if SWD -speed 4000 + loadbin MDK-ARM\bin\CDC.bin, 0x08000000
+（Keil 的 -f 会被正在运行的 uVision 占用，报 Target DLL has been cancelled）。
+
+已验证通过：
+
+| 项 | 证据 |
+|---|---|
+| 启动序列 | 横幅 模式=云端联调(MAIN_MODE_CLOUD) -> 各 [BOOT] -> 进入主循环 |
+| LoRa | LLCC68IoInit init sucess、SX1261、网关 UID=113608、LoRa RX=在收 补开=0 |
+| 4G 驻网 | IP=10.31.136.222、CEREG=1、CSQ=31(-51 dBm)、4G=ONLINE |
+| MQTT | 上线并有心跳：status.report 247 B，broker 回 puback（puback=3） |
+| 下行/命令/应答 | 串口注入 #json {"cmd":"sys.query_status",...} -> code=0、应答 285 B -> 发布到 .../cmdresp |
+| 失实日志修复 | [BOOT] 4G 暂不提前上电(...), 稍后由 g4_at_init() 上电（旧文案是"不给 4G 上电"） |
+
+未验证：
+
+- 真实液位/声光模块的 [LoRa RX]（需要一台从机在发）；
+- 产线流程 #bind / #set / #get（需要从机配合）；
+- 云端真实下发（需要有平台侧发 t/gw/<uid>/cmd 的权限）。
