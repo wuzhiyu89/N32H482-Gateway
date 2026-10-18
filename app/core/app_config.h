@@ -35,4 +35,13 @@
 #define MAIN_LORA_ENABLE         1
 #endif
 
+#ifndef MAIN_FW_VERSION
+#define MAIN_FW_VERSION          "1.0.0"
+#endif
+
+/* 其余编译期参数（尽量少：能进 config_store 的就别编译死） */
+#ifndef MAIN_OTA_PROGRESS_MS
+#define MAIN_OTA_PROGRESS_MS     10000u  /* ota.progress 最长静默期(文档 7.6: 10% 或 10s) */
+#endif
+
 #endif /* APP_CONFIG_H */
