@@ -1,97 +1,15 @@
 /**
- * \file  main.c
- * \brief N32H482 4G + LoRa 网关一体机入口
+ * @file  main.c
+ * @brief 固件入口：芯片 UID 钩子 + 三种编译期模式的唯一分发点
  *
- * ============================ 整机数据流 ============================
+ * main() 只做三件事：
+ *   1. 注册芯片 UID 来源（param_save / config_store 的出厂地址都靠它）；
+ *   2. 工程模式（LoRa 测试 / 从机配对）下先把 4G 断电，再进各自的循环（不返回）；
+ *   3. 正常固件：app_boot_run() 按顺序初始化，然后 app_loop_run() 进主循环。
  *
- *   [液位传感器/声光报警器] --LoRa--> 本板 --4G MQTT--> 云平台
- *                                      ^
- *   云平台 --4G MQTT(下行)--> 本板 --LoRa--> [从机]
- *
- *   上行: radio RxDone → lora_proto_poll → 帧解析(AA55+CRC16) → on_frame
- *           └─ 0x02 传感器上报 → 回 ACK(0x80) → data_cache_up_push
- *           └─ 0x80/0x81 从机 ACK → 从机状态 IDLE + 清下发缓存
- *         ★2026-10-08: 本行原写"4G 在线时由 lora_business_poll() 里的 data_cache_poll() 取缓存" —— 那条 hex 上行通道已整体删除, 现无此路径
- *         → 组 0x02 整帧 → hex → MQTT 发布, 【发成功了才出队】。
- *         (上行只有这一个出口, 不存在"立即发一遍 + 缓存再发一遍"的重复。)
- *
- *   下行: 4G URC(+MQTTURC: "publish") → g4_io 收包泵(按 <payload_len> 收定长二进制)
- *         → g4_urc 入队 → g4_urc_poll() → lora_mqtt_recv_cb
- *           └─ payload 是【一整个协议帧的二进制】(含 0x00/0x0A/0x0D, 不能当字符串),
- *              例: AA 55 01 11 00 01 21 00 01 01 07 05 00 0A 00 00 DC 05 98 E0
- *                  (⚠️ 2026-09 更正: 这帧的 CRC 原写作 38 1B, 是错的;
- *                   正确值 98 E0 —— 覆盖 ver..data 末尾, 低字节在前。)
- *           └─ 校验(帧头/版本/长度/CRC) → lora_business_send_req
- *                                        └→ 声光报警器常驻 RX: 立即下发
- *                                        └→ 液位传感器休眠:   等它上报时搭车下发
- *
- *   定时上行: 每 MAIN_GW_ONLINE_MS 往云端 pub 一条 "GW_ONLINE" 心跳,
- *             告诉云端本网关在线(见下面 (E) 那段)。
- *
- * ============================ 任务节拍 ============================
- *   本工程无 RTOS, 用 ATIM1 的 1ms 时基做分频调度, 主循环与 1ms 对齐:
- *     每 1ms   lora_business_poll()  radio 中断处理 + 帧分发 + ACK 超时/重传(内部 1s 限频)
- *     每 5ms   g4_at_poll()          收包泵 + 云端下行投递 + 非阻塞 AT 状态机 + 发布子流程
- *     每 10ms  app_console_poll()        日志口(USART1)手敲 AT 转发给模组(台架调试用)
- *     每 1s    app_status_report()       状态打印(PA8 心跳已取消: 那是 4G_RST)
- *     每 30s   在线心跳 "GW_ONLINE" + 命令行/缓存重投
- *
- * ============================ 声光报警器怎么下发 ============================
- *   【只在云端下发了 0x03 时才发】, 网关自己不会定时去叫它。
- *   以前上电会主动下发一次(MAIN_ALARM_BOOT_PUSH), 而且重传耗尽后缓存不删,
- *   于是 _try_send_alarm_idle() 每秒捡起来重发一遍 —— 空口被刷满、主循环被
- *   反复阻塞, 直接连累 4G 下行和液位上报。现在:
- *     - 去掉上电主动下发;
- *     - 重传 3 次没 ACK → 丢弃该条缓存并打日志(要重发由云端再下发)。
- *
- * ============================ 硬件资源 ============================
- *   USART1  PA9-TX  PA10-RX   日志(115200), 同时作 4G AT 手敲控制台
- *   USART2  PC8-TX  PC9-RX    4G 模组 ML307R AT 口(115200)
- *   UART6   PA0-TX  PA1-RX    RS232 (PA2-EN)
- *   USART4  PB0/PB1           485_0        UART7  PB11/PB10   485_1
- *   SPI3    PC10-SCK PC11-MISO PC12-MOSI  PA15-NSS(软)   LLCC68
- *           PD2-RST  PB3-BUSY  PB4-DIO1(EXTI4)  PB5-EN
- *   PA8     4G 模组【电源开关】(板上没引出 RST; "复位"=断一下电再上电)
- *           —— 开机第一件事就配成推挽输出并按当前极性上电
- *           ⚠️ 原"LED 心跳"已取消: 那会每秒翻转 PA8 = 每秒给模组断一次电
- *           极性未知 → g4_at.c 的供电极性自检会两个方向都试一遍
- *
- * ============================ 4G 建链顺序 ============================
- *   g4_at.c 的建链流程照搬现场验证过的 ml307_app.c/ml307_init:
- *     AT → ATE0 → 关深睡眠(MLPMCFG) → CPIN → IMEI(CGSN) → IMSI(CIMI)
- *     → ICCID → CSQ → 注册(CEREG/CGREG/CREG 轮换, 2s 一条共 30s)
- *     → APN(CGDCONT) → 激活 PDP(CGACT) → 查 IP(CGPADDR)
- *     → MQTTDISC → MQTTCONN(clientID=IMEI) → 等 conn URC → MQTTSUB → 在线
- *   要点: ① 主路是标准 3GPP 的 APN+PDP, AT+MDIALUP(USB/RNDIS 拨号)只做兜底;
- *         ② "拿不拿到 IP"是通不通的唯一判据, 不是 CGACT 回没回 OK;
- *         ③ MQTT clientID 用 IMEI, 多台网关不会互相顶下线。
- *   日志里关键行: "AT_SYNC: OK" / "[G4] PDP 已分配 IP: x.x.x.x" /
- *                 "===== MQTT ONLINE! ====="。
- *
- * ============================ 已知限制 ============================
- *   1) g4_at.c 目前只订阅一个主题(G4_MQTT_SUB_TOPIC), 云端下发必须发到该主题
- *      才能被 lora_mqtt_recv_cb 收到; OTA 的 ota/cmd、ota/data 主题尚未订阅。
- *   2) OTA 已改用 HTTP 通道(ota_http.c); 但当前是分区模式 1
- *      (FM_HAS_BOOTLOADER=0), 板上没有 bootloader, 校验通过后只能停在 READY,
- *      不能真把新固件装进运行区。要真安装: 切模式 2 + 先烧 BL。
- *   3) 【2026-09 结构性改版后】g4_at_poll() 内的 AT 收发已全部非阻塞, 接收由
- *      g4_io_pump() 统一消费; 仍然"阻塞"的只剩日志口手工诊断(#at/#vbat/#dial)
- *      和 g4_at_get_clock() —— 它们内部照样跑收包泵, 因此不会丢接收, 只会让
- *      主循环多等一会儿。
- *   4) 云端下发必须是【原始二进制帧】, 长度对上协议帧(data_len 在帧里)。若云端
- *      改发 ASCII hex 文本, g4_io 的收包器会按 <payload_len> 把 hex 文本的前一半
- *      当 payload —— 两种格式必须和云端约定死一种(见 g4_io.h 顶部)。
- *   5) USB 主机功能已停用并移出工程(archive/legacy/usb-host/); json_proto 同样
- *      已归档(archive/legacy/json-proto/)。
- *
- * ==================== 【最小 LoRa 收发隔离测试】MAIN_LORA_RAW_TEST ====================
- *   现场"网关收不到对端任何一帧"的排障用开关(默认见 app/drivers/lora/project_config.h):
- *     1 = main() 只起 时基/日志/射频, 每 5 秒发两条测试帧, 其余时间一直连续接收,
- *         并在【射频 IRQ 寄存器层】把收到的原始字节打出来(见本文件末尾 app_mode_rawtest_run()
- *         与 app/drivers/lora/radio.c 的 [RAW-IRQ]/[RAW-RX]); 4G / 业务 / 协议层 /
- *         参数 Flash / 心跳 全部不执行。切回正常固件: 把那个开关改回 0 重新编译,
- *         正常流程一行都没删(整体放在 main() 的 #else 里)。
- *     0 = 正常固件(与加这个开关之前完全一致)。
+ * 整机数据流、任务节拍、硬件资源、4G 建链顺序、已知限制、控制台命令
+ * 都【不再】重复写在这里 —— 唯一真相源是 docs/ARCHITECTURE.md。
+ * 改动行为时请更新那份文档，而不是本文件的注释。
  */
 #include "n32h47x_48x.h"
 #include "n32h47x_48x_gpio.h"
