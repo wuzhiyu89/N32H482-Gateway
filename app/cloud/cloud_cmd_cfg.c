@@ -116,7 +116,7 @@ int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data)
             if (cj_get(sections, known[n], NULL, 0) != CJ_NOTFOUND) { present++; }
         }
 
-        /* sections 是不是空对象 {}(含空� 空对象是合法�仢�么都不改" */
+        /* sections 是不是空对象 {}（空对象合法：什么都不改） */
         p = sections;
         while ((*p == ' ') || (*p == '\t') || (*p == '\n') || (*p == '\r')) { p++; }
         if (*p == '{')
@@ -153,7 +153,8 @@ int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data)
 
         if (config_store_save(&cloud_cfg_staging_buf) != CFG_OK)
         {
-            /* Flash 失败: 这些改动只存在于 RAM 副本� 掉电即失, 扢�以如实全�             * 记为 rejected 并回 1007。绝�应答说成功��实际没存住"�*/
+            /* Flash 失败: 这些改动只存在于 RAM 副本, 掉电即失, 所以如实全部
+             * 记为 rejected 并回 1007。绝不"应答说成功、实际没存住"。 */
             res.rejected |= res.applied;
             res.applied   = 0u;
             rc = CLOUD_EC_INTERNAL;
