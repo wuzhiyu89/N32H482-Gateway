@@ -2,7 +2,7 @@
  * @file  cloud_internal.h
  * @brief cloud/ 内部接口：下行路由（cloud_proto.c）与上行构造（cloud_uplink.c）之间
  *
- * 只允许 app/cloud/*.c include。对外 API 一律在 cloud_proto.h。
+ * 只允许 app/cloud 目录下的 .c include。对外 API 一律在 cloud_proto.h。
  */
 #ifndef CLOUD_INTERNAL_H
 #define CLOUD_INTERNAL_H
