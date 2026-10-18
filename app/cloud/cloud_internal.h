@@ -17,6 +17,10 @@ extern "C" {
 #endif
 
 /* 命令处理函数（按域拆文件；命令表仍在 cloud_proto.c） */
+int cloud_cmd_sys_query_status(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_sys_time_sync(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_sys_reboot(const cloud_req_t *req, cJSON *data);
+
 int cloud_cmd_ota_start(const cloud_req_t *req, cJSON *data);
 int cloud_cmd_ota_query(const cloud_req_t *req, cJSON *data);
 int cloud_cmd_ota_abort(const cloud_req_t *req, cJSON *data);

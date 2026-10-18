@@ -755,6 +755,11 @@
                       <FilePath>..\app\cloud\cloud_cmd_ota.c</FilePath>
                     </File>
                     <File>
+                      <FileName>cloud_cmd_sys.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\cloud\cloud_cmd_sys.c</FilePath>
+                    </File>
+                    <File>
                       <FileName>cloud_proto.h</FileName>
                       <FileType>5</FileType>
                       <FilePath>..\app\cloud\cloud_proto.h</FilePath>
@@ -1786,6 +1791,11 @@
                       <FileName>cloud_cmd_ota.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\cloud\cloud_cmd_ota.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>cloud_cmd_sys.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\cloud\cloud_cmd_sys.c</FilePath>
                     </File>
                     <File>
                       <FileName>cloud_proto.h</FileName>
