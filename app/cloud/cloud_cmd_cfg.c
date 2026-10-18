@@ -85,7 +85,7 @@ int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data)
         return CLOUD_EC_PARAM;
     }
 
-    /* ---- 逐域合并(每域独立事务: 合法的生� 非法的被� ---- */
+    /* ---- 逐域合并(每域独立事务: 合法的生效, 非法的被拒) ---- */
     (void)memcpy(&cloud_cfg_staging_buf, config_store_get(), sizeof(cloud_cfg_staging_buf));
     if (config_store_merge_sections(&cloud_cfg_staging_buf, sections, &res) != CFG_OK)
     {
@@ -93,13 +93,17 @@ int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data)
     }
 
     /* ---- 拼错的域名必须报出来, 不能默默忽略 ----
-     * config_store_merge_sections() 只认 8 个已知域� sections 里其它键会被
-     * 【静默丢弃����后� 平台�"thresholds" 打成 "threshold" � 我们�code=0
-     * �applied / rejected 都是空的 —��平台以为改成功了, 实际丢�个字没动�     * cloud_json 没有"对象键遍�接口, 扢�以这里用低成本判�
+     * config_store_merge_sections() 只认 8 个已知域, sections 里其它键会被
+     * 【静默丢弃】。于是平台把 "thresholds" 打成 "threshold", 我们回 code=0,
+     * 而 applied / rejected 都是空的 —— 平台以为改成功了, 实际一个字没动。
+     * cloud_json 没有"对象键遍历"接口, 所以这里用低成本判据:
      *   逐个数这 8 个已知域名有没有出现; 若【一个都没出现】而 sections 又不是空对象,
-     *   那就是键名全拼错�-> �1001, 让平台立刻看到��     * 【已知残留��部分拼错"(丢�个对 + 丢�个错)仍会被漏� 只表现为 applied 里少�     * 那一� 要彻底解决需要给 cloud_json 加对象键遍历接口�*/
+     *   那就是键名全拼错了 -> 回 1001, 让平台立刻看到。
+     * 【已知残留】"部分拼错"(一个对 + 一个错)仍会被漏掉, 只表现为 applied 里少一项;
+     *   要彻底解决需要给 cloud_json 加对象键遍历接口。 */
     {
-        /* 注意 meta 也要�认识": 它是 9 个配置域之一, 只是【系统维�不可写����         * 把它当拼写错误会�只发 meta"的报文从 0 变成 1001 —��那是两回事��*/
+        /* 注意 meta 也要"认识": 它是 9 个配置域之一, 只是【系统维护、不可写】。
+         * 把它当拼写错误会让"只发 meta"的报文从 0 变成 1001 —— 那是两回事。 */
         static const char *const known[] = { "system", "network", "sensors", "thresholds",
                                              "gears", "devices", "rules", "ota", "meta" };
         uint8_t     n;
