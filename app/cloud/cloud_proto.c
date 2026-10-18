@@ -1,43 +1,52 @@
 /**
  * @file  cloud_proto.c
- * @brief 云平台协议路由层实现(见 cloud_proto.h)
+ * @brief 云平台协议路由层实现（见 cloud_proto.h）
  *
- * 当前阶段(2026-10-02): 21 条下行命令【全部】接上真实实现 —— 最后三条
- * ota.start / ota.query / ota.abort 走"OTA over HTTP(S) + MD5"这条线
- * (数据源是 ML307R 原生 AT+MHTTP*, 见 app/ota/ota_http.c; 此前恒回 1006)。
+ * 下行：解析信封 -> 鉴权 -> msgId 幂等 -> 按命令名分发 -> 组应答。
+ * 21 条命令的实现已按域拆到 cloud_cmd_*.c（sys / cfg / rule / devices / ota），
+ * 本文件只保留：信封解析与组包、幂等环、命令表、日历换算、cJSON 打印，
+ * 以及 cfg 系列共用的"整份配置"暂存缓冲。
+ *
+ * 上行 data 的构造在 cloud_uplink.c。
  * 命令表 s_cmd_table[] 的排列顺序 = 文档第 4 章的命令编号。
  */
 #include "cloud_proto.h"
 #include "cloud_internal.h"
 #include "cloud_profile.h"
-#include "lora_business.h"      /* P5: sen.bind/dev.bind/sen.unbind/dev.unbind 异步对接 */
-#include "config_store.h"       /* P2-4: cfg.set / cfg.query; P2-5: sys.factory_reset */
-#include "last_value.h"         /* v53: sen.query / dev.query 要回"朢�近一次上� */
-#include "event_cache.h"        /* v59: sys.query_status �bufferedEvents 给真�
-                                * v62: 断线补报要把紧凑记录渲染成事件对象 */
-#include "level_eval.h"         /* v62: 补报 status_change 时由"迁移后状�推档�*/
-#include "level_supervisor.h"   /* �6 �dev.ctrl: �当前水位"渲染档位模板 */
-#include "sensor_offline.h"     /* �10 � sen.query/dev.query �online 判据(与失联检测同丢�� */
-#include "bsp_tim.h"            /* get_tick_ms() —��上面那个判据�当前时刻" */
-#include "cjson_port.h"         /* v33: 信封层改�cJSON —���hooks 必须�cjson_port_init() */
-#include "log.h"                /* P2-5: 恢复出厂的失败原因必须留下日志 */
-#include "ota_http.h"           /* 19~21 OTA over HTTP: ota.start/query/abort */
+#include "lora_business.h"      /* sen.bind/dev.bind/sen.unbind/dev.unbind 异步对接 */
+#include "config_store.h"       /* cfg.set / cfg.query / sys.factory_reset */
+#include "last_value.h"         /* sen.query / dev.query 的"最近一次上报"时刻 */
+#include "event_cache.h"        /* sys.query_status 的 bufferedEvents；
+                                 * 断线补报要把紧凑记录渲染成事件对象 */
+#include "level_eval.h"         /* 补报 status_change 时由"迁移后状态"推档位 */
+#include "level_supervisor.h"   /* dev.ctrl：按"当前水位"渲染档位模板 */
+#include "sensor_offline.h"     /* sen.query/dev.query 的 online 判据（与失联检测同一套） */
+#include "bsp_tim.h"            /* get_tick_ms() —— 上面那个判据的"当前时刻" */
+#include "cjson_port.h"         /* 信封层用 cJSON —— 必须先 cjson_port_init() 装静态池 hooks */
+#include "log.h"                /* 恢复出厂的失败原因必须留下日志 */
+#include "ota_http.h"           /* ota.start/query/abort 走 HTTP + MD5 */
 #include "ota_port.h"           /* ota_port_get_version() —— "与当前版本相同"判据 */
 #include <stdio.h>              /* snprintf —— 拼 sections[i] 这样的数组路径 */
 #include <string.h>
 
 /* ==================================================================
- * cfg.set / cfg.query 的工作缓�—��【必�static, 不能放栈上��P2-4)
+ * cfg.set / cfg.query 的工作缓冲 —— 【必须 static, 不能放栈上】(P2-4)
  * ==================================================================
- * 实测完整配置 JSON: 默认配置 1203 B, 满配朢��3 传感�+ 5 设备 + 满长文本)
- * 3584 B。��本工程栈只�0x1000 = 4096 B(� * firmware/CMSIS/device/startup/startup_n32h47x_48x.s �Stack_Size),
+ * 实测完整配置 JSON：默认配置 1203 B，满配（5 传感器 + 5 设备 + 满长文本）
+ * 约 3584 B。而本工程栈只有 0x1000 = 4096 B（见
+ * firmware/CMSIS/device/startup/startup_n32h47x_48x.s 的 Stack_Size），
  * 把 4KB 级的缓冲放栈上会直接爆栈 —— 而且是在"云平台下发 cfg.query"这条
- * 没法本地复现的路径上� 极难定位� *
- * 扢�� 改为文件�static 并放大到 CFG_JSON_MAX + 64(信封外的 data �� * 安全� 本工程是【单线程轮询� cloud_proto_handle() 只在主循环里被调�
- * 不会重入(命令处理里也不会再��归调用�, 扢��static 暂存是安全的� * 原来�CLOUD_DATA_MAX=320 �默认配置"都装不下, cfg.query 必然溢出失败� */
+ * 没法本地复现的路径上，极难定位。
+ *
+ * 所以改为文件级 static，并放大到 CFG_JSON_MAX + 64（信封之外的 data 段）。
+ * 安全性：本工程是【单线程轮询】，cloud_proto_handle() 只在主循环里被调，
+ * 不会重入（命令处理里也不会递归调用自己），因此 static 暂存是安全的。
+ * 原来的 CLOUD_DATA_MAX=320 连"默认配置"都装不下，cfg.query 必然溢出失败。
+ */
 static char s_data_buf[CFG_JSON_MAX + 64u];
 
-/* cloud_proto_handle() 传进来的"网关当前时间", �cfg.set �meta.updatedAt� * 不用下行报文里的 ts: 那是平台的时� 网关的时间戳该用网关自己的��*/
+/* cloud_proto_handle() 传进来的"网关当前时间"，用于 cfg.set 的 meta.updatedAt。
+ * 不用下行报文里的 ts：那是平台的时间，网关的时间戳应该用网关自己的。 */
 static uint32_t s_gw_now_ts;
 
 uint32_t cloud_proto_get_now_ts(void)
@@ -46,7 +55,7 @@ uint32_t cloud_proto_get_now_ts(void)
 }
 
 /* ==================================================================
- * 21 条下行命�文档 4 �
+ * 21 条下行命令（文档第 4 章）
  * ================================================================== */
 
 typedef int (*cloud_cmd_fn)(const cloud_req_t *req, cJSON *data);
@@ -64,13 +73,13 @@ const char *const cloud_cfg_section_names[] =
 };
 
 
-/* 21 条命令已全部接真实实现; 占位函数 cloud_cmd_not_impl 于 2026-10-02 删除。 */
+/* 21 条命令已全部接真实实现；占位函数 cloud_cmd_not_impl 于 2026-10-02 删除。 */
 
 /* ==================================================================
- * cfg.set / cfg.query 真实�文档 gateway-protocol 5.2 �
+ * cfg.set / cfg.query 的实现（文档 gateway-protocol 5.2）
  * ================================================================== */
 
-/** �-> 域名。顺�= 文档 5.2 的固定顺� 也是应答�applied/rejected 的排列顺�*/
+/** 位 -> 域名。顺序 = 文档 5.2 的固定顺序，也是应答里 applied/rejected 的排列顺序 */
 typedef struct
 {
     uint8_t     bit;                    /* CFG_CH_* */
@@ -91,7 +100,7 @@ static const cfg_section_name_t s_section_names[] =
 
 #define CFG_SECTION_NAME_COUNT (sizeof(s_section_names) / sizeof(s_section_names[0]))
 
-/** 把位掩码写成【域名字符串数组� ["thresholds","sensors"] (文档 5.2 应答形状) */
+/** 把位掩码写成【域名字符串数组】，如 ["thresholds","sensors"]（文档 5.2 应答形状） */
 bool cloud_write_section_list(cJSON *obj, const char *key, uint8_t mask)
 {
     cJSON  *arr = cJSON_CreateArray();
@@ -114,8 +123,9 @@ bool cloud_write_section_list(cJSON *obj, const char *key, uint8_t mask)
     return true;
 }
 
-/* cfg.set 的工作副� config_store_t ~1.7KB, 同样不能放栈上�� * 【为仢�么要在副本上做��先合并 -> 校验 -> �Flash, 全部成功才提交回"当前配置"
- * 实例。万丢� Flash 写失� RAM �Flash 不会出现"丢�个变了��一个没�的分裂状态��*/
+/* cfg.set 的工作副本：config_store_t 约 1.7KB，同样不能放栈上。
+ * 【为什么在副本上做】先合并 -> 校验 -> 落 Flash，全部成功才提交回"当前配置"
+ * 实例。万一 Flash 写失败，RAM 与 Flash 不会出现"一个变了、一个没变"的分裂状态。 */
 config_store_t cloud_cfg_staging_buf;
 
 /* ★ 2026-09-30 用户决定: 【不做 rejectedDetail(拒绝原因)】★
