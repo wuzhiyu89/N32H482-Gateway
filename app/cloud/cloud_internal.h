@@ -16,6 +16,11 @@
 extern "C" {
 #endif
 
+/* 命令处理函数（按域拆文件；命令表仍在 cloud_proto.c） */
+int cloud_cmd_ota_start(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_ota_query(const cloud_req_t *req, cJSON *data);
+int cloud_cmd_ota_abort(const cloud_req_t *req, cJSON *data);
+
 /** cJSON 池化打印（原 cloud_proto_print）：成功返回长度，0 = 失败/溢出 */
 uint16_t cloud_json_print(char *out, uint16_t cap, cJSON *root);
 
