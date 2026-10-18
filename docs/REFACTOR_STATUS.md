@@ -57,8 +57,8 @@ LoRa 侧新增 `lora_internal.h`，`lora_field.c` 独立。
 
 编码事故留下的 `U+FFFD`。已清零：`radio.c`、`llcc68-board.h`、
 `cloud_cmd_rule.c`、`cloud_cmd_sys.c`、`cloud_proto.c`（文件头 120 行）。
-**剩余 235 行（108 个注释块）**，分布：
-`cloud_proto.c` 82（36 块）/ `cloud_cmd_devices.c` 75（28 块）/ `cloud_uplink.c` 44（30 块）/ `cloud_cmd_cfg.c` 34（14 块）。
+**剩余 235 行（103 个注释块）**，分布：
+`cloud_proto.c` 36 块 / `cloud_cmd_devices.c` 28 块 / `cloud_uplink.c` 30 块 / `cloud_cmd_cfg.c` 9 块。
 
 ## 二、未完成
 
