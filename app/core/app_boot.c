@@ -73,7 +73,9 @@ void app_boot_run(void)
     delay_ms(300);
     log_info("[BOOT] 4G 上电后 300ms 仍然活着(没有欠压复位)\r\n");
 #else
-    log_info("[BOOT] !! 隔离测试: 不给 4G 模组上电(MAIN_G4_POWER_AT_BOOT=0)\r\n");
+    /* 注意: 这里只是"不提前上电" —— 4G 最终由 g4_at_init() 上电(并做拔插/预热)。
+     * 旧文案写成"不给 4G 上电", 现场看到 4G 明明在跑 AT, 会误以为日志和硬件对不上。 */
+    log_info("[BOOT] 4G 暂不提前上电(MAIN_G4_POWER_AT_BOOT=0), 稍后由 g4_at_init() 上电\r\n");
     G4_PowerSwitch_InitNoPower();
 #endif
 
