@@ -277,7 +277,7 @@ uint16_t cloud_proto_build_buffered_data(char *out, uint16_t cap,
  * @brief 把事件缓存里的一条【紧凑记录】渲染成【完整的】事件对象文本
  * @param out          输出缓冲
  * @param cap          容量
- * @param rec          缓存记录(见 app/business/event_cache.h)
+ * @param rec          缓存记录(见 app/service/event_cache.h)
  * @param msg_id       本次补报给这条事件分配的 msgId(<=16 字节, 由调用方生成 ——
  *                     记录里【不存】msgId, 否则每条至少多 16 B, 容量直接减半)
  * @param results      仅 EC_KIND_ACTION 用: 同一次动作的多台设备执行结果

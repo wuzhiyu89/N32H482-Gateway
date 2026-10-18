@@ -63,16 +63,17 @@ try {
         # "addr >= FM_SLOT_B_ADDR"(而 FM_SLOT_B_ADDR = 0), 触发 always-true 警告。
         # 是那个头文件本身的既有写法, 与 OTA 无关, 所以只压掉这一类。
         '-Wno-type-limits',
-        '-I_host_test/stub', '-Iapp/protocol', '-Iapp/business', '-Iapp/common',
-        '-Iapp/ota',
-        '-Iapp/ring_buf', '-Iapp/cjson', '-Iapp/radio/llcc68', '-I_host_test', '-Iinc'
+        '-I_host_test/stub', '-Iapp/links/g4', '-Iapp/links/lora', '-Iapp/links/serial',
+        '-Iapp/cloud', '-Iapp/model', '-Iapp/service', '-Iapp/common',
+        '-Iapp/ota', '-Iapp/common/ring_buf', '-Iapp/cjson', '-Iapp/drivers/lora',
+        '-I_host_test', '-Iinc'
         # -Iapp/ota 是 OTA over HTTP 这条线加的: md5.h 在 app/ota, 且后续
         # ota_http.c 也要在这一层做主机测试(状态机可以喂假 URC 跑)。
-        # -Iapp/radio/llcc68 is needed since P5 (2026-09-29): cloud_proto.c now
+        # -Iapp/drivers/lora/llcc68 is needed since P5 (2026-09-29): cloud_proto.c now
         # includes lora_business.h -> lora_proto.h -> project_config.h, and that
-        # last one lives in app/radio/llcc68 (not reachable from the other -I
+        # last one lives in app/drivers/lora/llcc68 (not reachable from the other -I
         # paths). Without it test_cloud fails to build with:
-        #   app/protocol/lora_proto.h:45: fatal error: project_config.h: No such file
+        #   app/links/lora/lora_proto.h:45: fatal error: project_config.h: No such file
     )
 
     $suites = @(
@@ -80,8 +81,8 @@ try {
             name = 'test_rx'
             exe  = '_host_test\test_rx.exe'
             src  = @(
-                'app/protocol/g4_io.c', 'app/protocol/g4_urc.c',
-                'app/ring_buf/ring_buf.c',
+                'app/links/g4/g4_io.c', 'app/links/g4/g4_urc.c',
+                'app/common/ring_buf/ring_buf.c',
                 '_host_test/host_stub.c', '_host_test/test_rx.c'
             )
         },
@@ -89,8 +90,8 @@ try {
             name = 'test_state'
             exe  = '_host_test\test_state.exe'
             src  = @(
-                'app/protocol/g4_io.c', 'app/protocol/g4_urc.c', 'app/protocol/g4_at.c',
-                'app/business/local_alarm.c', 'app/ring_buf/ring_buf.c',
+                'app/links/g4/g4_io.c', 'app/links/g4/g4_urc.c', 'app/links/g4/g4_at.c',
+                'app/service/local_alarm.c', 'app/common/ring_buf/ring_buf.c',
                 '_host_test/host_stub.c', '_host_test/test_state.c'
             )
         },
@@ -98,19 +99,19 @@ try {
             name = 'test_cloud'
             exe  = '_host_test\test_cloud.exe'
             src  = @(
-                'app/protocol/cloud_json.c', 'app/protocol/cloud_proto.c',
-                'app/business/cloud_profile.c', 'app/business/config_store.c',
+                'app/cloud/cloud_json.c', 'app/cloud/cloud_proto.c',
+                'app/model/cloud_profile.c', 'app/model/config_store.c',
                 'app/common/utils.c',       # CRC32 等工具已搬到 app/common/utils.c
-                'app/business/sensor_offline.c', 'app/business/last_value.c',
-                'app/business/level_supervisor.c', 'app/business/level_eval.c',
-                'app/business/event_cache.c',
+                'app/service/sensor_offline.c', 'app/model/last_value.c',
+                'app/service/level_supervisor.c', 'app/service/level_eval.c',
+                'app/service/event_cache.c',
                 'app/cjson/cJSON.c', 'app/cjson/cjson_port.c',
-                'app/ring_buf/ring_buf.c',
+                'app/common/ring_buf/ring_buf.c',
                 # 2026-10-02: cloud_proto.c 的 ota.start/query/abort 接了真实实现,
                 # 于是它真的会调 ota_http_* —— 这些必须一起链进来, 否则链接期
                 # 报 undefined reference to ota_http_start / ota_port_get_version。
                 'app/ota/ota_http.c', 'app/ota/md5.c',
-                'app/protocol/g4_io.c', 'app/protocol/g4_urc.c',
+                'app/links/g4/g4_io.c', 'app/links/g4/g4_urc.c',
                 '_host_test/fake_ota_port.c',
                 '_host_test/fake_lora_business.c',
                 '_host_test/host_stub.c', '_host_test/test_cloud.c'
@@ -120,10 +121,10 @@ try {
             name = 'test_cfg'
             exe  = '_host_test\test_cfg.exe'
             src  = @(
-                'app/business/config_store.c', 'app/protocol/cloud_json.c',
+                'app/model/config_store.c', 'app/cloud/cloud_json.c',
                 'app/common/utils.c',       # CRC32 等工具已搬到 app/common/utils.c
                 'app/cjson/cJSON.c', 'app/cjson/cjson_port.c',
-                'app/ring_buf/ring_buf.c',
+                'app/common/ring_buf/ring_buf.c',
                 '_host_test/host_stub.c', '_host_test/test_cfg.c'
             )
         },
@@ -132,7 +133,7 @@ try {
             exe  = '_host_test\test_cjson.exe'
             src  = @(
                 'app/cjson/cJSON.c', 'app/cjson/cjson_port.c',
-                'app/ring_buf/ring_buf.c',
+                'app/common/ring_buf/ring_buf.c',
                 '_host_test/host_stub.c', '_host_test/test_cjson.c'
             )
         },
@@ -140,9 +141,9 @@ try {
             name = 'test_level'
             exe  = '_host_test\test_level.exe'
             src  = @(
-                'app/business/level_eval.c',
+                'app/service/level_eval.c',
                 'app/common/utils.c',   # level_eval.c 的档位组帧用 utils 的 utf8_char_len()
-                'app/ring_buf/ring_buf.c',
+                'app/common/ring_buf/ring_buf.c',
                 '_host_test/host_stub.c', '_host_test/test_level.c'
             )
         },
@@ -152,7 +153,7 @@ try {
               name = 'test_telemetry_cache'
               exe  = '_host_test\test_telemetry_cache.exe'
               src  = @(
-                  'app/business/telemetry_cache.c',
+                  'app/service/telemetry_cache.c',
                   '_host_test/test_telemetry_cache.c'
               )
           },
@@ -160,8 +161,8 @@ try {
             name = 'test_last_value'
             exe  = '_host_test\test_last_value.exe'
             src  = @(
-                'app/business/last_value.c',
-                'app/ring_buf/ring_buf.c',
+                'app/model/last_value.c',
+                'app/common/ring_buf/ring_buf.c',
                 '_host_test/host_stub.c', '_host_test/test_last_value.c'
             )
         },
@@ -173,8 +174,8 @@ try {
             exe  = '_host_test\test_ota_http.exe'
             src  = @(
                 'app/ota/ota_http.c', 'app/ota/md5.c',
-                'app/protocol/g4_io.c', 'app/protocol/g4_urc.c',
-                'app/ring_buf/ring_buf.c',
+                'app/links/g4/g4_io.c', 'app/links/g4/g4_urc.c',
+                'app/common/ring_buf/ring_buf.c',
                 '_host_test/host_stub.c', '_host_test/fake_ota_port.c',
                 '_host_test/test_ota_http.c'
             )
@@ -201,7 +202,7 @@ try {
             src  = @(
                 'app/ota/ota_port.c',
                 'app/common/utils.c',
-                'app/ring_buf/ring_buf.c',
+                'app/common/ring_buf/ring_buf.c',
                 '_host_test/host_stub.c', '_host_test/fake_storage.c',
                 '_host_test/test_ota_port.c'
             )
@@ -223,7 +224,7 @@ try {
                 'app/ota/ota_port.c',
                 'app/ota/ota_health.c',
                 'app/common/utils.c',
-                'app/ring_buf/ring_buf.c',
+                'app/common/ring_buf/ring_buf.c',
                 '_host_test/host_stub.c', '_host_test/fake_storage.c',
                 '_host_test/test_ota_health.c'
             )
@@ -235,7 +236,7 @@ try {
             exe  = '_host_test\test_utf8.exe'
             src  = @(
                 'app/common/utils.c',
-                'app/ring_buf/ring_buf.c',
+                'app/common/ring_buf/ring_buf.c',
                 '_host_test/host_stub.c', '_host_test/test_utf8.c'
             )
         }

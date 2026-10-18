@@ -471,7 +471,7 @@ const RadioIrqStat_t *RadioIrqStat( void )
  * 【挂在哪一层 —— 这是本次测试最要紧的一点】
  *   接收链路自底向上是:
  *     DIO1(PB4) 电平变化
- *       → EXTI4_IRQHandler()(app/LLCC68N32H482-board.c)
+ *       → EXTI4_IRQHandler()(app/drivers/lora/LLCC68N32H482-board.c)
  *       → RadioOnDioIrq()            只置 IrqFired(中断上下文里什么重活都不干)
  *     RadioIrqProcess()  ← 由主循环的 Radio.IrqProcess() 调用(主循环上下文)
  *       → LLCC68GetIrqStatus()       读【芯片的原始 IRQ 状态字】

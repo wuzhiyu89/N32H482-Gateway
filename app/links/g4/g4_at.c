@@ -3309,7 +3309,7 @@ void g4_at_set_console_ext(g4_console_ext_fn ext, g4_console_help_fn help)
  * 【射频诊断为什么不在这个文件】: 本文件属于 4G/AT 模块, include 里没有任何射频
  * 头文件, 而且要被主机单测(_host_test/test_state)编译 —— 把 radio.h/LLCC68-board.h
  * 引进来会把射频层耦合到 4G 模块并破坏主机测试。所以 #lora 走 main.c 的扩展钩子,
- * 实现放在 app/protocol/lora_proto.c 的 LoraApp_DiagPrint()。
+ * 实现放在 app/links/lora/lora_proto.c 的 LoraApp_DiagPrint()。
  */
 bool g4_at_console_cmd(const char *line)
 {

@@ -7,11 +7,11 @@
  * 现场极易误判成信号问题。这个探针把命令原样打出来, 在 PC 上就能核对。
  *
  * 不参与正式套件(没有加进 run.ps1); 手动编译:
- *   gcc -std=c99 -I_host_test/stub -Iapp/protocol -Iapp/business -Iapp/common \
- *       -Iapp/ota -Iapp/bootloader -Iapp/ring_buf -Iapp/cjson -Iapp/radio/llcc68 \
- *       -I_host_test -Iinc \
- *       app/protocol/g4_io.c app/protocol/g4_urc.c app/protocol/g4_at.c \
- *       app/business/local_alarm.c app/ring_buf/ring_buf.c \
+ *   gcc -std=c99 -I_host_test/stub -Iapp/links/g4 -Iapp/links/lora -Iapp/links/serial \
+ *       -Iapp/cloud -Iapp/model -Iapp/service -Iapp/common -Iapp/common/ring_buf \
+ *       -Iapp/ota -Iapp/cjson -Iapp/drivers/lora -I_host_test -Iinc \
+ *       app/links/g4/g4_io.c app/links/g4/g4_urc.c app/links/g4/g4_at.c \
+ *       app/service/local_alarm.c app/common/ring_buf/ring_buf.c \
  *       _host_test/host_stub.c _host_test/probe_at_cfg.c -o _host_test/probe_at_cfg.exe
  */
 #include <stdio.h>

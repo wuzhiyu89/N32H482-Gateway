@@ -30,7 +30,6 @@ extern "C"
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "LLCC68/LLCC68.h"
 #include "llcc68.h"
 
 //������˳��ٽ�����������

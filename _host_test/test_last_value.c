@@ -1,6 +1,6 @@
 /**
  * \file  test_last_value.c
- * \brief 设备"最后值"快照表的主机单测(见 app/business/last_value.h)
+ * \brief 设备"最后值"快照表的主机单测(见 app/model/last_value.h)
  *
  * 价值在于两件现场很难复现的事:
  *   1) 【按 uid 覆盖, 不是入队】同一设备反复上报应保持 1 条并刷新字段+计数,

@@ -1,6 +1,6 @@
 /**
  * \file  test_level.c
- * \brief 边缘水位评估纯逻辑的主机单测(见 app/business/level_eval.h)
+ * \brief 边缘水位评估纯逻辑的主机单测(见 app/service/level_eval.h)
  *
  * 这一组测试的价值在于【边界等号】: 文档 3.4 的表里
  *   Warning 是 warningCm < level <  alarmCm  (两头都是开区间)

@@ -85,10 +85,10 @@
  *      已归档(archive/legacy/json-proto/)。
  *
  * ==================== 【最小 LoRa 收发隔离测试】MAIN_LORA_RAW_TEST ====================
- *   现场"网关收不到对端任何一帧"的排障用开关(默认见 app/radio/llcc68/project_config.h):
+ *   现场"网关收不到对端任何一帧"的排障用开关(默认见 app/drivers/lora/project_config.h):
  *     1 = main() 只起 时基/日志/射频, 每 5 秒发两条测试帧, 其余时间一直连续接收,
  *         并在【射频 IRQ 寄存器层】把收到的原始字节打出来(见本文件末尾 rawtest_run()
- *         与 app/radio/llcc68/radio.c 的 [RAW-IRQ]/[RAW-RX]); 4G / 业务 / 协议层 /
+ *         与 app/drivers/lora/radio.c 的 [RAW-IRQ]/[RAW-RX]); 4G / 业务 / 协议层 /
  *         参数 Flash / 心跳 全部不执行。切回正常固件: 把那个开关改回 0 重新编译,
  *         正常流程一行都没删(整体放在 main() 的 #else 里)。
  *     0 = 正常固件(与加这个开关之前完全一致)。
@@ -135,7 +135,7 @@
 #include "sensor_offline.h"  /* 液位失联判定(#offline 诊断用; 事件发布在下面) */
 
 /* MAIN_LORA_RAW_TEST(最小 LoRa 收发隔离测试开关)的真相源。
- * 它的【本体与说明】写在 app/radio/llcc68/project_config.h: 那个头是
+ * 它的【本体与说明】写在 app/drivers/lora/project_config.h: 那个头是
  * main.c / lora_proto.c / radio.c 三个编译单元都会包含的射频工程配置头,
  * 开关放那里才能被三处同时看到(C 的宏不跨 .c 传递)。
  * 这里显式包含一次, 免得下面的 #if 依赖别的头文件的包含顺序。 */
@@ -1811,7 +1811,7 @@ static void main_backfill_poll(void)
 
 /* ★★★ 这里【不是】模式开关 —— 不要再在本文件里写 #define MAIN_MODE_xxx ★★★
  *
- * 模式宏的唯一真相源是 app/radio/llcc68/project_config.h(经 lora_proto.h 在本文件
+ * 模式宏的唯一真相源是 app/drivers/lora/project_config.h(经 lora_proto.h 在本文件
  * 前面就被包含了)。写在这里【一律无效】, 两个原因:
  *   1) project_config.h 早在本文件之前就用 #ifndef 把它们定好了;
  *   2) radio.c / lora_proto.c 是【各自单独编译】的, 根本看不到本文件里的定义 ——
@@ -1830,7 +1830,7 @@ static void main_backfill_poll(void)
  * 本处自检只是兜底保险: 真正的校验已放在 project_config.h 里, 任何包含它的编译
  * 单元都会更早、更明确地报出来。 */
 #if ((MAIN_MODE_CLOUD + MAIN_MODE_PAIRING + MAIN_MODE_LORA_TEST) != 1)
-#error "主功能模式必须恰好选一个: 见 app/radio/llcc68/project_config.h 的『主功能模式(三选一)』"
+#error "主功能模式必须恰好选一个: 见 app/drivers/lora/project_config.h 的『主功能模式(三选一)』"
 #endif
 
 /* ==================== 网关在线心跳 ====================
@@ -2940,7 +2940,7 @@ static void main_downlink_log_cb(const char *topic, const uint8_t *data, uint16_
  *      【不另配一套】。更不碰同步字/功率。
  *
  * 【★怎么切回正常固件★】
- *   把 app/radio/llcc68/project_config.h 里 MAIN_LORA_RAW_TEST 由 1 改成 0
+ *   把 app/drivers/lora/project_config.h 里 MAIN_LORA_RAW_TEST 由 1 改成 0
  *   (或在 Keil/IDE 的 C/C++ -> Define 里定义 MAIN_LORA_RAW_TEST=0 覆盖), 重新编译。
  *   开关=0 时本段代码(#if 之内)整体不参与编译, main() 走 #else 分支 ——
  *   那就是加这个开关之前的正常固件, Program Size 逐项一致。

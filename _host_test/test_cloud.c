@@ -1241,7 +1241,7 @@ static void test_factory_reset(void)
  *           就把所有液位从机的上次上报时间拿出来对比, 超过 3 倍上报周期没上报的,
  *           就发"传感器失联"。
  *
- * 被测对象是 app/business/sensor_offline.c —— 它不 include 任何硬件头, 时间戳由
+ * 被测对象是 app/service/sensor_offline.c —— 它不 include 任何硬件头, 时间戳由
  * 调用方传进来, 所以这里能直接用"确定的时间点"把边界全部跑一遍。
  * lora_business.c 那边只剩"读状态 → 调这个纯函数 → 发事件"的胶水。
  */

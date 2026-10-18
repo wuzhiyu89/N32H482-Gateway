@@ -1,7 +1,7 @@
 """模式开关矩阵验证 —— 覆盖用户实际会用的【两条路径】:
 
   A) Keil → Options for Target → C/C++ → Define  (命令行 -D)
-  B) 直接改 app/radio/llcc68/project_config.h 源码里的 0/1
+  B) 直接改 app/drivers/lora/project_config.h 源码里的 0/1
 
 对每个场景用 gcc -E 预处理 main.c, 检查:
   1) 到底选中了哪个模式(看 MAIN_MODE_NAME 展开后出现在横幅里的那个字符串)

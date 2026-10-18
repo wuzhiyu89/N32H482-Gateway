@@ -1,7 +1,7 @@
 /**
  * \file  test_telemetry_cache.c
  * \brief 离线期间的"逐条液位上报"环形缓存的主机单测
- *        (见 app/business/telemetry_cache.h)
+ *        (见 app/service/telemetry_cache.h)
  *
  * 为什么值得单独测:
  *   这是**现场最难复现**的一块 —— 要断 4G、等液位报几十条、再重连，

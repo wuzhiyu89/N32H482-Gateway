@@ -101,7 +101,7 @@ typedef struct
     uint32_t           send_req_tick;     /* 发送时刻 tick */
 
     /* ---- 液位失联检测状态(2026-09-27 用户补充要求第 3 条) ----
-     * 纯逻辑在 app/business/sensor_offline.c; 这里只放状态, 算法一行都不在这里。
+     * 纯逻辑在 app/service/sensor_offline.c; 这里只放状态, 算法一行都不在这里。
      *
      * 【last_recv_tick 与 last_report_tick 是两回事, 千万别混用】:
      *   last_recv_tick   收到【任何帧】(含 0x80/0x81 ACK)都会刷新 —— 只说明"它还在说话";
@@ -300,7 +300,7 @@ uint8_t lora_business_get_slave_count(void);
  *    就把所有液位从机的上次上报时间拿出来对比，如果有很久没上报的（比如 3 倍
  *    上报周期没上报），就向云端发送传感器失联。"
  *
- * 【判定与去重的纯逻辑在 app/business/sensor_offline.c】, 本模块只做两件事:
+ * 【判定与去重的纯逻辑在 app/service/sensor_offline.c】, 本模块只做两件事:
  *   1) 维护每个液位从机的 last_report_tick / offline_reported;
  *   2) 到"该报"的时候调用注册进来的回调(真正的组 JSON + 发 MQTT 在 main.c)。
  *

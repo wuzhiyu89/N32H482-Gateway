@@ -525,7 +525,7 @@ static void _bind_handle_dev_ack(const lora_frame_t *frame)
          *    那台设备以后收不到联动指令(能绑定、能上报, 就是不动灯)。
          *
          * ⚠️⚠️ 【本分支目前没有主机单测覆盖】⚠️⚠️
-         *   _host_test 里没有任何套件链接【真的】app/protocol/lora_business.c
+         *   _host_test 里没有任何套件链接【真的】app/links/lora/lora_business.c
          *   (test_cloud 用的是 _host_test/fake_lora_business.c 那个假实现),
          *   因为本文件依赖 LoRa/radio 时序。⇒ 改这段代码【必须上板验证】,
          *   "主机单测全绿"对它没有意义。
@@ -1137,7 +1137,7 @@ static void _schedule_default_level_downlink(const uint8_t dev_uid[CFG_UID_BYTES
  *           每次收到一路液位上报, 就把所有液位从机的上次上报时间拿出来比,
  *           超过【3 倍上报周期】没上报的, 就向云端发"传感器失联"。
  *
- * 【判定/边界/回绕/去重的算法全在 app/business/sensor_offline.c】, 那是一个
+ * 【判定/边界/回绕/去重的算法全在 app/service/sensor_offline.c】, 那是一个
  * 不依赖硬件的纯模块(主机单测直接覆盖); 这里只有状态与胶水。
  *
  * 三处口径说明(代码里也标了, 免得以后有人"顺手改一下"改错):
@@ -3269,7 +3269,7 @@ void lora_business_gear_stats(uint16_t *ok, uint16_t *skip)
 }
 
 /* ==================== LoRa 射频健康状态 ====================
- * 实现在 app/LLCC68N32H482-board.c(射频中间层)。这里用 extern 直接声明, 免得为了
+ * 实现在 app/drivers/lora/LLCC68N32H482-board.c(射频中间层)。这里用 extern 直接声明, 免得为了
  * 两个查状态的函数把射频层的头文件引进业务层。 */
 extern uint8_t LLCC68IsStuck(void);
 extern uint8_t LLCC68BusyLevel(void);

@@ -84,8 +84,8 @@
  * 【为什么这个开关写在本文件, 而不是 src/main.c】
  *   它必须被【三个不同的编译单元】看到:
  *     src/main.c                  —— 测试主循环(发/收/打印累计计数)
- *     app/protocol/lora_proto.c   —— 生产射频初始化 + 生产发送路径(被测试复用)
- *     app/radio/llcc68/radio.c    —— IRQ 寄存器层/原始字节的原样打印
+ *     app/links/lora/lora_proto.c   —— 生产射频初始化 + 生产发送路径(被测试复用)
+ *     app/drivers/lora/radio.c    —— IRQ 寄存器层/原始字节的原样打印
  *   C 语言的宏【不跨 .c 传递】: 只写在 main.c 里, 另外两个 .c 永远看到"未定义
  *   (按 0 处理)" —— 在 main.c 里把 0 改成 1 会【静默无效】(测试模式的打印点
  *   一个都不生效, 现场会误判成"射频一个字节都没收到")。
@@ -156,7 +156,7 @@
 
 /* ---- 三选一自检: 放在本文件, 于是【每个包含它的编译单元】都会检查 ---- */
 #if ((MAIN_MODE_CLOUD + MAIN_MODE_PAIRING + MAIN_MODE_LORA_TEST) != 1)
-#error "主功能模式必须【恰好选一个】(MAIN_MODE_CLOUD / PAIRING / LORA_TEST), 见 app/radio/llcc68/project_config.h"
+#error "主功能模式必须【恰好选一个】(MAIN_MODE_CLOUD / PAIRING / LORA_TEST), 见 app/drivers/lora/project_config.h"
 #endif
 
 /* ---- 模式名字符串: 开机横幅打出来, 一眼确认"这次到底编进了哪个模式" ---- */

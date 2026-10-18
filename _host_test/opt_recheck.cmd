@@ -11,8 +11,8 @@ REM Usage (from the demo dir): _host_test\opt_recheck.cmd
 
 setlocal
 set WARN=-Wall -Wextra -Wno-unused-parameter -Wno-type-limits -Wmaybe-uninitialized -Wstrict-overflow=2 -Warray-bounds=2
-set INC=-std=c99 -I_host_test/stub -Iapp/protocol -Iapp/business -Iapp/common -Iapp/ota -Iapp/bootloader -Iapp/ring_buf -Iapp/cjson -Iapp/radio/llcc68 -I_host_test -Iinc
-set SRC=app/ota/ota_http.c app/ota/md5.c app/protocol/g4_io.c app/protocol/g4_urc.c app/ring_buf/ring_buf.c _host_test/host_stub.c _host_test/fake_ota_port.c _host_test/test_ota_http.c
+set INC=-std=c99 -I_host_test/stub -Iapp/links/g4 -Iapp/links/lora -Iapp/links/serial -Iapp/cloud -Iapp/model -Iapp/service -Iapp/common -Iapp/common/ring_buf -Iapp/ota -Iapp/cjson -Iapp/drivers/lora -I_host_test -Iinc
+set SRC=app/ota/ota_http.c app/ota/md5.c app/links/g4/g4_io.c app/links/g4/g4_urc.c app/common/ring_buf/ring_buf.c _host_test/host_stub.c _host_test/fake_ota_port.c _host_test/test_ota_http.c
 
 for %%O in (O2 Os O3) do (
   echo === -%%O ===
