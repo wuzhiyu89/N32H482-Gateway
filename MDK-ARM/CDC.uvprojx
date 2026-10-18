@@ -986,6 +986,11 @@
                       <FilePath>..\app\core\app_uplink.c</FilePath>
                     </File>
                     <File>
+                      <FileName>app_level.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_level.c</FilePath>
+                    </File>
+                    <File>
                       <FileName>app_modes.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\core\app_modes.c</FilePath>
@@ -1991,6 +1996,11 @@
                       <FileName>app_uplink.c</FileName>
                       <FileType>1</FileType>
                       <FilePath>..\app\core\app_uplink.c</FilePath>
+                    </File>
+                    <File>
+                      <FileName>app_level.c</FileName>
+                      <FileType>1</FileType>
+                      <FilePath>..\app\core\app_level.c</FilePath>
                     </File>
                     <File>
                       <FileName>app_modes.c</FileName>
