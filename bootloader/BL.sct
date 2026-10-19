@@ -1,0 +1,17 @@
+; ******************************************************************
+; *** BL (BootLoader) 专用 Scatter-Loading Description File       ***
+; *** 链接到 0x08000000, 长度 16KB = 2 页                          ***
+; *** 由 MDK-ARM/build/BL/builder.params 引用                     ***
+; ******************************************************************
+
+LR_IROM1 0x08000000 0x00004000 {
+	ER_IROM1 0x08000000 0x00004000 {
+		*.o (RESET, +First) 
+		*(InRoot$$Sections) 
+		.ANY (+RO) 
+		.ANY (+XO) 
+	}
+	RW_IRAM1 0x20000000 0x00030000 {
+		.ANY (+RW +ZI) 
+	}
+}
