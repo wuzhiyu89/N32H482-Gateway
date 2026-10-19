@@ -870,8 +870,16 @@ cfg_result_t config_store_from_json(config_store_t *c, const char *json)
      *     · 连 save 的回读校验都失败 -> A 区永远写不进去(只写了 B)。
      *   (2026-10-19 实机: 1.0.3 -> 1.0.4 升级后 "两区都不可用(code=4)")
      *   cfg.set 那条路径不受影响: 它走 merge_sections, 不会到达这里。 */
-    (void)cj_get_str(json, "ota.fwVersion", c->ota.fw_version,
-                     (uint16_t)sizeof(c->ota.fw_version));
+    {
+        char fw[CFG_FWVER_MAX + 1u];
+
+        /* 注意: cj_get_str() 找不到字段时会把目标【清空】—— 所以必须先取到临时缓冲,
+         * 取到且非空才覆盖; 否则 {} 这种空配置会把出厂默认的 fwVersion 也清掉。 */
+        if (cj_get_str(json, "ota.fwVersion", fw, (uint16_t)sizeof(fw)) && (fw[0] != '\0'))
+        {
+            (void)strcpy(c->ota.fw_version, fw);
+        }
+    }
 
     /* CRC 校验必须在 merge 之后: 此时 c 才是这份 JSON 的完整解析结果。
      * 先重新序列化一次拿到"应有"的 CRC, 再和 JSON 里声明比 —— 这一步同时
