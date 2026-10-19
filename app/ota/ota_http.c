@@ -761,6 +761,9 @@ static bool s_create_sent;          /* 同上, 专给 AT+MHTTPCREATE 那一步 *
 static uint32_t s_eng_wait_tick;
 static bool     s_eng_wait_logged;
 
+/* 下载到 100% 的那一刻 latch 一个事件, 由 app_uplink 强制补报 verifying/100%% */
+static bool     s_dl_done_pending;
+
 /* ★2026-10-08: CONNECTING 每条 CFG 的"连续超时重发"计数(见 conn_cmd 的超时分支)★
  * 现场教训: AT+MHTTPCFG="ssl" 超时后老代码只打"命令超时(继续)"就往下走,
  * 结果 ssl 根本没配上 -> 后面 https 请求回 +CME ERROR: 655(SSL 未使能) -> 白跑一轮。 */
@@ -1228,6 +1231,7 @@ static void poll_downloading(void)
         {
             log_info("[OTA_HTTP] 下载完成 %lu 字节(已下盘 %lu, 余下由校验前统一 flush), 开始校验\r\n",
                      (unsigned long)s_rx_total, (unsigned long)s_written);
+            s_dl_done_pending = true;
             set_state(OTA_HTTP_VERIFYING);
             return;
         }
@@ -1550,6 +1554,7 @@ void ota_http_init(void)
 bool ota_http_start(const char *url, const char *md5hex, uint32_t size,
                     const char *version)
 {
+    s_dl_done_pending = false;   /* 新一轮: 清掉上一轮的完成事件 */
     uint16_t n;
 
     if (ota_http_busy())
@@ -1887,6 +1892,13 @@ bool ota_http_busy(void)
 uint32_t ota_http_chunk_got(void)   { return s_chunk_got; }
 uint32_t ota_http_written(void)     { return s_written; }
 uint32_t ota_http_retry_count(void) { return s_retry_total; }
+
+bool ota_http_take_download_done(void)
+{
+    bool pending = s_dl_done_pending;
+    s_dl_done_pending = false;
+    return pending;
+}
 
 const char *ota_http_state_name(ota_http_state_t st)
 {

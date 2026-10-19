@@ -660,11 +660,24 @@ void app_ota_progress_poll(void)
         /* 不 return: 下面照常把 installing 那一条报出去 */
     }
 
-    /* 发送判据走 ota_http_progress_due() —— 纯函数, 主机侧测得到 */
-    if (!ota_http_progress_due(&st, s_last_state, s_last_percent,
-                               now, s_t_last, MAIN_OTA_PROGRESS_MS))
+    /* ★下载完成必须单独补报一条★
+     *   DOWNLOADING -> VERIFYING 可能短于一个轮询周期, 只靠采样云端看不到
+     *   下载完成。ota_http 在迁移点设了 latch, 这里强制发 verifying/100%。
+     *   st 是本函数的局部副本, 改它只影响这一条上报。 */
     {
-        return;
+        uint8_t force_verify = ota_http_take_download_done() ? 1u : 0u;
+
+        if ((force_verify == 0u) &&
+            (!ota_http_progress_due(&st, s_last_state, s_last_percent,
+                                    now, s_t_last, MAIN_OTA_PROGRESS_MS)))
+        {
+            return;
+        }
+        if (force_verify != 0u)
+        {
+            st.state   = OTA_HTTP_VERIFYING;
+            st.percent = 100u;
+        }
     }
 
     s_last_state   = (uint8_t)st.state;

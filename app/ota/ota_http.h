@@ -204,6 +204,9 @@ const char *ota_http_state_name(ota_http_state_t st);
  *   · READY           报一次(installing), 之后由调用方走复位流程
  *   · 其余状态        状态变 / 跨 10% 台阶 / 静默超时 三者任一即发
  */
+/** 取走下载完成事件(见 ota_http.c 的 s_dl_done_pending 说明) */
+bool ota_http_take_download_done(void);
+
 bool ota_http_progress_due(const ota_http_status_t *st,
                            uint8_t last_state, uint8_t last_percent,
                            uint32_t now_ms, uint32_t last_ms,
