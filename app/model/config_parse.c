@@ -861,6 +861,18 @@ cfg_result_t config_store_from_json(config_store_t *c, const char *json)
     r = config_store_merge_json(c, json, NULL);
     if (r != CFG_OK) { return r; }
 
+    /* ★必须在这里恢复 ota.fwVersion★
+     *   它是"固件自己维护"的只读字段: cfg.set 的增量合并里【故意不解析】它
+     *   (平台不可写), 但它【参与 CRC 覆盖】。全量解析(上电读 Flash / save 回读校验)
+     *   如果不恢复它, 重算 CRC 时它仍是出厂默认 "1.0.0", 而 Flash 里存的是上一版
+     *   固件写下的 "1.0.3" ⇒ 每次升级后配置都判 CRC 错:
+     *     · 两区轮流报废 -> 回出厂 -> 绑定丢失;
+     *     · 连 save 的回读校验都失败 -> A 区永远写不进去(只写了 B)。
+     *   (2026-10-19 实机: 1.0.3 -> 1.0.4 升级后 "两区都不可用(code=4)")
+     *   cfg.set 那条路径不受影响: 它走 merge_sections, 不会到达这里。 */
+    (void)cj_get_str(json, "ota.fwVersion", c->ota.fw_version,
+                     (uint16_t)sizeof(c->ota.fw_version));
+
     /* CRC 校验必须在 merge 之后: 此时 c 才是这份 JSON 的完整解析结果。
      * 先重新序列化一次拿到"应有"的 CRC, 再和 JSON 里声明比 —— 这一步同时
      * 验证了【序列化器与解析器互为逆运算】: 任何一边丢字段/截断都会在这里暴露。 */
