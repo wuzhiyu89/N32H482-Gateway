@@ -38,7 +38,11 @@
  */
 #if MAIN_AT_CONSOLE_ENABLE
 
-#define CONSOLE_BUF_SIZE   128U
+/* 一行必须装得下真实的云命令 JSON：`#json {"cmd":"ota.start",...}` 约 200 字节。
+ * 128 字节时会被静默截断 —— 表现为"敲了 #json 却什么都没发生"，
+ * 连带 #json 离线自测根本无法注入 cfg.set / ota.start 这类真实命令。
+ * RAM 代价：这块从 128 提到 384，两个缓冲共 +512 B（本工程 RW+ZI 仍有余量）。 */
+#define CONSOLE_BUF_SIZE   384U
 
 static volatile uint8_t  s_con_buf[CONSOLE_BUF_SIZE];
 static volatile uint16_t s_con_wr = 0U;
