@@ -28,6 +28,7 @@
 #include "lora_business.h"
 #include "ota_health.h"
 #include "ota_http.h"
+#include "ota_port.h"
 #include "param_save.h"
 #include "serial_proto.h"
 
@@ -172,6 +173,23 @@ void app_boot_run(void)
         const config_store_t *cfg = config_store_get();
         const char *dev_id = ((cfg != NULL) && (cfg->system.gw_id[0] != '\0'))
                                  ? cfg->system.gw_id : "11000000000000000000000000";   /* 2026-10-18: 兜底也 26 位 */
+
+        /* (0) ★固件版本自愈★
+         *   `ota.fwVersion` 是固件维护的只读字段, 但以前没人写它 —— cfg.query 永远
+         *   显示出厂默认 "1.0.0", 与 status.report 的 MAIN_FW_VERSION 打架;
+         *   而 ota_port_get_version() 以前也写死 "1.0.0", 导致"同版本 OTA 应回 1006"
+         *   永远不成立(升到 1.0.3 后再发 1.0.3 照样受理)。
+         *   这里把编译期版本注入两处: 一次上电只写一次 Flash(值没变就不写)。 */
+        ota_port_set_version(MAIN_FW_VERSION);
+        if (config_store_set_fw_version(MAIN_FW_VERSION) != CFG_OK)
+        {
+            log_info("[BOOT] !! ota.fwVersion 回写 Flash 失败, 本次只在内存生效\r\n");
+        }
+        else
+        {
+            log_info("[BOOT] 固件版本 = %s (已同步到 config.ota.fwVersion)\r\n",
+                     ota_port_get_version());
+        }
 
         /* (1) ★先把遗留档位迁移到文档档位★
          * Flash(param_save 页)里可能存着旧固件写下的 LOCAL 档(mod/cmd ...),

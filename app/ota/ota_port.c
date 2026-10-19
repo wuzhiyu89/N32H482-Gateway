@@ -23,6 +23,7 @@
 #include "n32h47x_48x.h"       /* NVIC_SystemReset */
 #include "bsp_tim.h"           /* get_tick_ms */
 #include <string.h>
+#include <stdio.h>              /* snprintf: 版本字符串注入 */
 
 /* 续传记录的合法性上界: 每个分包至少 512 字节, 所以 packet_count 不可能超过
  * OTA_FLASH_SIZE / 512。这个 512 来自旧的 MQTT 分包版(已归档), 这里只是拿它
@@ -698,13 +699,21 @@ void ota_port_rollback_clear(void)
 
 
 /* ==================== 版本 / 重boot ==================== */
+/* 当前固件版本: 由 app_boot 在上电时注入 MAIN_FW_VERSION。
+ * ★以前这里返回写死的 OTA_APP_VERSION "1.0.0"★ —— 于是 ota.start 的
+ *   "与当前版本相同 -> 1006" 永远不成立: 升到 1.0.3 之后再发 1.0.3 照样受理,
+ *   平台也永远看不到真实版本。默认值只作兜底(未注入时)。 */
+static char s_app_version[24] = "0.0.0";
+
+void ota_port_set_version(const char *ver)
+{
+    if ((ver == NULL) || (ver[0] == '\0')) { return; }
+    (void)snprintf(s_app_version, sizeof(s_app_version), "%s", ver);
+}
+
 const char *ota_port_get_version(void)
 {
-    /* TODO: 从 param_save 或编译宏读取,默认占位 */
-#ifndef OTA_APP_VERSION
-#define OTA_APP_VERSION "1.0.0"
-#endif
-    return OTA_APP_VERSION;
+    return s_app_version;
 }
 
 void ota_port_reboot(void)

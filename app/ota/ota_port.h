@@ -361,10 +361,15 @@ void ota_port_rollback_clear(void);
 /* ==================== 系统 ==================== */
 
 /**
- * @brief 获取当前固件版本号(从参数区/编译宏读取)
+ * @brief 获取当前固件版本号
  * @return 版本字符串(静态存储,以'\0'结尾)
+ * @note  值来自 ota_port_set_version()；未注入时返回 "0.0.0"
+ *        (以前这里返回写死的 "1.0.0"，导致同版本 OTA 永远不被拒)
  */
 const char *ota_port_get_version(void);
+
+/** @brief 注入当前固件版本(app_boot 用 MAIN_FW_VERSION 调一次) */
+void ota_port_set_version(const char *ver);
 
 /**
  * @brief 系统重启(进入 bootloader 或复位)

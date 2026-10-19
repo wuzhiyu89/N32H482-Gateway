@@ -374,6 +374,17 @@ const config_store_t *config_store_get(void);
 /** 当前内存中配置的 configVersion */
 uint32_t config_store_version(void);
 
+/**
+ * @brief 把"当前固件版本"写进配置的 ota.fwVersion
+ *
+ * 为什么需要它: `ota.fwVersion` 是**固件自己维护**的只读字段(平台不可写)，
+ * 但以前全工程没有一处写它 —— 出厂默认写死 "1.0.0" 之后再也没变过，
+ * 于是 `cfg.query` 永远显示 1.0.0，和 `status.report`(编译期 MAIN_FW_VERSION) 打架。
+ * 上电时调用一次；只有值真的变了才写 Flash，且**不动 configVersion**
+ * (版本号不是"配置变更"，平台不该因升级看到版本冲突)。
+ */
+cfg_result_t config_store_set_fw_version(const char *ver);
+
 /** 标记内存配置已改动: configVersion+1, updatedAt=now */
 void config_store_touch(config_store_t *c, uint32_t now_unix);
 

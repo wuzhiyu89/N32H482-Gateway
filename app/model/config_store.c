@@ -779,6 +779,26 @@ uint32_t config_store_version(void)
     return config_store_get()->meta.config_version;
 }
 
+/* 固件版本 -> 配置的 ota.fwVersion。只读字段, 平台不可写; 由固件自己维护。
+ * 值没变就【不写 Flash】(每次上电都擦一页毫无意义), 变了才落盘,
+ * 且【不动 configVersion】—— 升级不是"配置变更", 平台不该看到版本冲突。 */
+cfg_result_t config_store_set_fw_version(const char *ver)
+{
+    config_store_t *c;
+    char            tmp[CFG_FWVER_MAX + 1u];
+
+    if ((ver == NULL) || (ver[0] == '\0')) { return CFG_ERR_PARAM; }
+
+    c = config_store_get_mut();
+    if (c == NULL) { return CFG_ERR_PARAM; }
+
+    (void)snprintf(tmp, sizeof(tmp), "%s", ver);
+    if (strcmp(c->ota.fw_version, tmp) == 0) { return CFG_OK; }
+
+    (void)strcpy(c->ota.fw_version, tmp);
+    return config_store_save(c);
+}
+
 void config_store_touch(config_store_t *c, uint32_t now_unix)
 {
     if (c == NULL) { return; }
