@@ -23,6 +23,8 @@
 #include "level_supervisor.h"
 #include "lora_business.h"
 #include "ota_health.h"
+#include "flash_map.h"
+#include "ota_port.h"
 #include "ota_http.h"
 
 void app_loop_run(void)

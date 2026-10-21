@@ -359,6 +359,7 @@ static bool bl_boot_save(const ota_boot_rec_t *rec)
     uint32_t       i;
 
     w = *rec;
+    w.seq   = rec->seq + 1u;      /* 每次写都要递增: load 取最大 seq, 否则同 seq 会读到旧记录 */
     w.magic = OTA_BOOT_MAGIC;
     (void)memset(w.rsv, 0, sizeof(w.rsv));
     w.crc = bl_crc32_update(0xFFFFFFFFU, (const uint8_t *)&w, 12u) ^ 0xFFFFFFFFU;
