@@ -3,7 +3,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "ota_meta.h"   /* ota_meta_t 定义在此(ota_port 持久化时引用) */
+#include "ota_meta.h"
+#include "ota_boot.h"   /* ota_meta_t 定义在此(ota_port 持久化时引用) */
 #include "flash_map.h"  /* 分区地址唯一真相源 */
 
 /**
@@ -357,6 +358,26 @@ bool ota_port_rollback_save(const ota_rollback_t *rec);
  * @brief 使回滚记录失效(只把 magic 清 0, 【不擦页】—— 与 resume_clear 同模式)
  */
 void ota_port_rollback_clear(void);
+
+/* ==================== A/B 启动记录 ==================== */
+/** 读取最新一条有效启动记录；false = 没有(首次/记录损坏) */
+bool ota_port_boot_load(ota_boot_rec_t *out);
+
+/** 追加写一条启动记录；false = 槽满/写入失败(调用方保持原状态) */
+bool ota_port_boot_save(const ota_boot_rec_t *rec);
+
+/* ==================== A/B 槽 / 运行时暂存区 ==================== */
+/** 当前运行槽(0=A,1=B)；由 SCB->VTOR 判定，模式 1 恒为 0 */
+uint8_t  ota_port_current_slot(void);
+/** 本次 OTA 的目标槽(0=A,1=B) */
+uint8_t  ota_port_target_slot(void);
+/** 把下载暂存区指向某个槽(addr=槽基址)；同时更新目标槽 */
+void     ota_port_set_stage(uint32_t addr, uint32_t size);
+uint32_t ota_port_stage_addr(void);
+uint32_t ota_port_stage_size(void);
+/** 主循环每拍：pending 槽跑够时间 + 联网 + 有上行确认 -> 转正 */
+void     ota_port_boot_poll(bool online, bool uplink_ok, uint32_t uptime_s);
+
 
 /* ==================== 系统 ==================== */
 

@@ -461,6 +461,8 @@ bool cloud_fill_status_json(cJSON *obj, const cloud_status_t *st)
     return ((cJSON_AddBoolToObject(obj, "online", st->online ? 1 : 0) != NULL) &&
             (cJSON_AddStringToObject(obj, "fwVersion",
                 (st->fw_version != NULL) ? st->fw_version : "0.0.0") != NULL) &&
+            (cJSON_AddStringToObject(obj, "slot",
+                (st->slot != NULL) ? st->slot : "A") != NULL) &&
             (cJSON_AddNumberToObject(obj, "configVersion",
                 (double)st->config_version) != NULL) &&
             /* 见 cloud_proto.h 的说明: 这里是 CSQ 换算出的 RSSI, 不是 RSRP */

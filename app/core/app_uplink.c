@@ -107,6 +107,7 @@ void app_fill_status(cloud_status_t *st)
 
     st->online         = true;
     st->fw_version     = fw_ver;
+    st->slot           = (ota_port_current_slot() == 1u) ? "B" : "A";
     st->config_version = config_store_version();   /* P2 已落地, 不再是占位的 0 */
     st->rsrp_dbm       = g4_at_get_info()->rssi_dbm;
     st->uptime_s       = get_tick_ms() / 1000u;
@@ -629,6 +630,28 @@ void app_ota_progress_poll(void)
 #if MAIN_OTA_AUTO_REBOOT
         if (s_reboot_cnt == 0u)
         {
+#if (FM_HAS_BOOTLOADER != 0)
+            {
+                ota_boot_rec_t r;
+                uint8_t        tgt = ota_port_target_slot();
+
+                if (!ota_port_boot_load(&r)) { r.seq = 0u; }
+                r.active    = ota_port_current_slot();
+                r.pending   = tgt;
+                r.confirmed = 0u;
+                r.tries     = OTA_BOOT_TRIES_INIT;
+                r.seq++;
+                if (!ota_port_boot_save(&r))
+                {
+                    log_info("[AB] !! 启动记录写入失败, 升级不会切换槽\r\n");
+                }
+                else
+                {
+                    log_info("[AB] 已登记 pending=%c(剩 %u 次), 3s 后从该槽启动\r\n",
+                             (tgt == 0u) ? 'A' : 'B', (unsigned)r.tries);
+                }
+            }
+#endif
             s_reboot_cnt = 3u;
             log_info("[OTA_HTTP] 校验通过且标记页已写, 3s 后复位交给 bootloader\r\n");
         }

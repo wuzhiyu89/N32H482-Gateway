@@ -1468,7 +1468,7 @@ static void poll_erasing(void)
     if (!s_erase_started)
     {
         uint32_t total_pages = (s_size + FM_PAGE_SIZE - 1u) / FM_PAGE_SIZE;
-        uint32_t cap         = FM_STAGE_SIZE / FM_PAGE_SIZE;
+        uint32_t cap         = ota_port_stage_size() / FM_PAGE_SIZE;
         uint32_t first_page  = s_resume_from / FM_PAGE_SIZE;
 
         if (total_pages > cap)
@@ -1585,11 +1585,11 @@ bool ota_http_start(const char *url, const char *md5hex, uint32_t size,
     (void)memcpy(s_url_raw, url, strlen(url) + 1u);
 
     /* ---- size ---- */
-    if ((size == 0u) || (size > FM_STAGE_SIZE))
+    if ((size == 0u) || (size > ota_port_stage_size()))
     {
         s_err = OTA_HTTP_E_NOSPACE;
         log_info("[OTA_HTTP] !! size=%lu 超出暂存区(%lu)\r\n",
-                 (unsigned long)size, (unsigned long)FM_STAGE_SIZE);
+                 (unsigned long)size, (unsigned long)ota_port_stage_size());
         return false;
     }
     s_size = size;

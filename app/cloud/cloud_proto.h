@@ -138,6 +138,7 @@ typedef struct
 {
     bool        online;
     const char *fw_version;
+    const char *slot;          /* "A" / "B" A/B 槽位(云端据此选镜像) */
     uint32_t    config_version;
     int16_t     rsrp_dbm;
     uint32_t    uptime_s;

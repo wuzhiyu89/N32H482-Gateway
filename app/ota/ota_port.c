@@ -23,12 +23,19 @@
 #include "n32h47x_48x.h"       /* NVIC_SystemReset */
 #include "bsp_tim.h"           /* get_tick_ms */
 #include <string.h>
+#include "log.h"
 #include <stdio.h>              /* snprintf: 版本字符串注入 */
 
 /* 续传记录的合法性上界: 每个分包至少 512 字节, 所以 packet_count 不可能超过
  * OTA_FLASH_SIZE / 512。这个 512 来自旧的 MQTT 分包版(已归档), 这里只是拿它
  * 当"最小分包"下界用, 与当前 HTTP 通道的分块大小无关。 */
 #define OTA_PACKET_PAYLOAD_MAX   512u
+
+static uint32_t s_stage_addr = (uint32_t)FM_STAGE_ADDR;
+static uint32_t s_stage_size = (uint32_t)FM_STAGE_SIZE;
+static uint8_t  s_target_slot = 1u;
+
+
 
 /* ==================== Flash 擦除(分步异步,每次擦一页) ====================
  * 复用 storage_flash_erase_page: 内部已做 0x2000 对齐检查 + 中断保护 +
@@ -78,7 +85,7 @@ bool ota_port_flash_erase_step(void)
         return true;    /* 全部完成 */
     }
 
-    uint32_t page_addr = OTA_FLASH_ADDR + g_erase_done_pages * OTA_FLASH_PAGE_SIZE;
+    uint32_t page_addr = s_stage_addr + g_erase_done_pages * OTA_FLASH_PAGE_SIZE;
     if (!storage_flash_erase_page(page_addr))
     {
         g_erase_failed = true;
@@ -113,7 +120,7 @@ bool ota_port_flash_write(uint32_t offset, const uint8_t *data, uint16_t len)
         return true;
     }
 
-    uint32_t addr = OTA_FLASH_ADDR + offset;
+    uint32_t addr = s_stage_addr + offset;
 
     /* 安全检查: 写入范围不能超出 OTA 缓存区 */
     if ((offset + len) > OTA_FLASH_SIZE)
@@ -169,7 +176,7 @@ bool ota_port_flash_read(uint32_t offset, uint8_t *buf, uint16_t len)
     {
         return false;
     }
-    return storage_flash_read(OTA_FLASH_ADDR + offset, buf, len);
+    return storage_flash_read(s_stage_addr + offset, buf, len);
 }
 
 /* ==================== CRC32 (纯软件, IEEE 802.3, 多项式 0xEDB88320) ====================
@@ -695,6 +702,130 @@ void ota_port_rollback_clear(void)
      *   在追加式语义下它只作废【第一个槽】(而 load 取最后一条, 毫无作用),
      *   更糟的是它会去写一个已经编程过的槽 ⇒ 必然失败(白走一次 Flash)。
      * ⇒ 干脆不写。要真正"忘记"记录, 唯一干净的办法是擦整页(会毁 OTA 标记), 不做。 */
+}
+
+
+/* ==================== A/B 启动记录 ==================== */
+static bool boot_slot_erased(const ota_boot_rec_t *r)
+{
+    const uint8_t *p = (const uint8_t *)r;
+    uint16_t       i;
+
+    for (i = 0u; i < sizeof(*r); i++)
+    {
+        if (p[i] != 0xFFu) { return false; }
+    }
+    return true;
+}
+
+bool ota_port_boot_load(ota_boot_rec_t *out)
+{
+    ota_boot_rec_t rec;
+    ota_boot_rec_t best;
+    bool           found = false;
+    uint32_t       i;
+
+    if (out == NULL) { return false; }
+
+    for (i = 0u; i < OTA_BOOT_SLOTS; i++)
+    {
+        if (!storage_flash_read(OTA_META_ADDR + OTA_BOOT_REGION_OFFSET + i * OTA_BOOT_REC_SZ,
+                                (uint8_t *)&rec, (uint16_t)sizeof(rec)))
+        {
+            break;
+        }
+        if (rec.magic != OTA_BOOT_MAGIC) { continue; }
+        if ((rec.active > 1u) ||
+            ((rec.pending > 1u) && (rec.pending != OTA_BOOT_SLOT_NONE)) ||
+            (rec.confirmed > 1u) || (rec.tries > OTA_BOOT_TRIES_INIT))
+        {
+            continue;
+        }
+        if (rec.crc != crc32_ieee((const uint8_t *)&rec, 12u)) { continue; }
+
+        if ((!found) || (rec.seq > best.seq)) { best = rec; found = true; }
+    }
+
+    if (found) { *out = best; }
+    return found;
+}
+
+bool ota_port_boot_save(const ota_boot_rec_t *rec)
+{
+    ota_boot_rec_t w;
+    ota_boot_rec_t cur;
+    uint32_t       i;
+
+    if (rec == NULL) { return false; }
+
+    w = *rec;
+    w.magic = OTA_BOOT_MAGIC;
+    (void)memset(w.rsv, 0, sizeof(w.rsv));
+    w.crc = crc32_ieee((const uint8_t *)&w, 12u);
+
+    for (i = 0u; i < OTA_BOOT_SLOTS; i++)
+    {
+        uint32_t addr = OTA_META_ADDR + OTA_BOOT_REGION_OFFSET + i * OTA_BOOT_REC_SZ;
+
+        if (!storage_flash_read(addr, (uint8_t *)&cur, (uint16_t)sizeof(cur)))
+        {
+            return false;
+        }
+        if (!boot_slot_erased(&cur)) { continue; }
+
+        return storage_flash_write(addr, (const uint8_t *)&w, (uint16_t)sizeof(w));
+    }
+
+    return false;       /* 槽满: 停止写入(fail-safe, 不擦页) */
+}
+
+uint8_t ota_port_current_slot(void)
+{
+#if (FM_HAS_BOOTLOADER != 0)
+    return (SCB->VTOR >= (uint32_t)FM_SLOT_B_ADDR) ? 1u : 0u;
+#else
+    return 0u;
+#endif
+}
+
+uint8_t  ota_port_target_slot(void) { return s_target_slot; }
+uint32_t ota_port_stage_addr(void)  { return s_stage_addr; }
+uint32_t ota_port_stage_size(void)  { return s_stage_size; }
+
+void ota_port_set_stage(uint32_t addr, uint32_t size)
+{
+    s_stage_addr  = addr;
+    s_stage_size  = size;
+    s_target_slot = (addr == (uint32_t)FM_SLOT_B_ADDR) ? 1u : 0u;
+}
+
+void ota_port_boot_poll(bool online, bool uplink_ok, uint32_t uptime_s)
+{
+#if (FM_HAS_BOOTLOADER != 0)
+    ota_boot_rec_t r;
+    uint8_t        cur = ota_port_current_slot();
+
+    if ((uptime_s < 60u) || (!online) || (!uplink_ok)) { return; }
+    if (!ota_port_boot_load(&r)) { return; }
+    if (r.pending != cur) { return; }
+
+    r.active    = cur;
+    r.pending   = OTA_BOOT_SLOT_NONE;
+    r.confirmed = 1u;
+    r.tries     = 0u;
+    r.seq++;
+    if (ota_port_boot_save(&r))
+    {
+        log_info("[AB] 新固件确认健康 -> 槽 %c 转正(active=%c)\r\n",
+                 (cur == 0u) ? 'A' : 'B', (cur == 0u) ? 'A' : 'B');
+    }
+    else
+    {
+        log_info("[AB] !! 启动记录写入失败(槽满?), 下次启动仍按 pending 计\r\n");
+    }
+#else
+    (void)online; (void)uplink_ok; (void)uptime_s;
+#endif
 }
 
 

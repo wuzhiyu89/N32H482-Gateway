@@ -62,9 +62,16 @@ void app_loop_run(void)
          * 三条都满足就把本槽"定案"(写一次 Flash), 之后本函数立即变成空操作。
          * 【为什么每圈调而不是挂 1s 节拍】: 定案后 s_done=true 直接 return,
          *   定案前也只是 3 次比较 —— 比"再找一个 1s 节拍插入点"简单且不易错。 */
+#if (FM_HAS_BOOTLOADER == 0)
         ota_health_poll(g4_at_is_online(),
                         (g4_urc_puback_count() > 0u),
                         (uint32_t)(now / 1000u));
+#else
+        /* A/B: pending 槽跑够 60s + 联网 + 有上行确认 -> 转正(由 BL 下次启动沿用) */
+        ota_port_boot_poll(g4_at_is_online(),
+                           (g4_urc_puback_count() > 0u),
+                           (uint32_t)(now / 1000u));
+#endif
 
         /* (A) 每 1ms: LoRa radio 中断处理 + 帧解析分发 + 从机表/重传/上行缓存 */
 #if MAIN_LORA_ENABLE

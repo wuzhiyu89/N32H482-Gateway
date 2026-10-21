@@ -404,3 +404,15 @@ uint16_t ota_port_crc16(const uint8_t *data, uint16_t len)
     }
     return crc;
 }
+
+/* ==================== A/B 槽（主机替身） ==================== */
+uint8_t  ota_port_current_slot(void) { return 0u; }
+uint8_t  ota_port_target_slot(void)  { return 1u; }
+void     ota_port_set_stage(uint32_t addr, uint32_t size) { (void)addr; (void)size; }
+uint32_t ota_port_stage_addr(void) { return (uint32_t)FM_STAGE_ADDR; }
+uint32_t ota_port_stage_size(void) { return (uint32_t)FM_STAGE_SIZE; }
+void     ota_port_boot_poll(bool online, bool uplink_ok, uint32_t uptime_s)
+{ (void)online; (void)uplink_ok; (void)uptime_s; }
+bool ota_port_boot_load(ota_boot_rec_t *out) { if (out) { memset(out, 0, sizeof(*out)); } return false; }
+bool ota_port_boot_save(const ota_boot_rec_t *rec) { (void)rec; return true; }
+

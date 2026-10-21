@@ -424,6 +424,7 @@ void app_boot_run(void)
      * ======================================================================== */
     /* 无条件编译: 模式 1 下只记录日志, 零副作用(见下面的 (乙) 说明)。
      * (旧的 MQTT 分包版 ota.c 已归档, 不再有 MAIN_OTA_ENABLE 这个开关。) */
+#if (FM_HAS_BOOTLOADER == 0)
     if (ota_health_boot_step() == OTA_HEALTH_BOOT_ROLLBACK)
     {
 #if (FM_HAS_BOOTLOADER != 0)
@@ -436,10 +437,43 @@ void app_boot_run(void)
                  "复位只会重跑同一槽 -> 若切成模式 2 这里会真的回滚\r\n");
 #endif
     }
+#endif /* FM_HAS_BOOTLOADER == 0 */
+
+#if (FM_HAS_BOOTLOADER != 0)
+    {
+        ota_boot_rec_t r;
+        uint8_t        cur = ota_port_current_slot();
+
+        if (!ota_port_boot_load(&r))
+        {
+            r.magic     = OTA_BOOT_MAGIC;
+            r.seq       = 1u;
+            r.active    = cur;
+            r.pending   = OTA_BOOT_SLOT_NONE;
+            r.confirmed = 1u;
+            r.tries     = 0u;
+            (void)ota_port_boot_save(&r);
+            log_info("[AB] 首次启动: 建立启动记录 active=%c\r\n",
+                     (cur == 0u) ? 'A' : 'B');
+        }
+        else if (r.pending == cur)
+        {
+            log_info("[AB] 试运行槽 %c: 剩 %u/%u 次机会, 确认后转正\r\n",
+                     (cur == 0u) ? 'A' : 'B', (unsigned)r.tries,
+                     (unsigned)OTA_BOOT_TRIES_INIT);
+        }
+        else
+        {
+            log_info("[AB] active=%c, 当前槽=%c, 无 pending\r\n",
+                     (r.active == 0u) ? 'A' : 'B', (cur == 0u) ? 'A' : 'B');
+        }
+    }
+#else
     log_info("[OTAHL] A/B: 槽=%u 剩=%u 次 %s\r\n",
              (unsigned)ota_health_boot_slot(),
              (unsigned)ota_health_tries_left(),
              ota_health_confirmed() ? "(已定案)" : "(待确认)");
+#endif
 
     log_info("[BOOT] 进入主循环\r\n");
 }

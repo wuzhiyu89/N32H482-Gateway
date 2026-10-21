@@ -94,6 +94,16 @@ int cloud_cmd_ota_start(const cloud_req_t *req, cJSON *data)
         return CLOUD_EC_STATE;
     }
 
+#if (FM_HAS_BOOTLOADER != 0)
+    {
+        uint8_t tgt = (uint8_t)(ota_port_current_slot() ^ 1u);
+
+        ota_port_set_stage(ota_boot_slot_base(tgt), OTA_BOOT_SLOT_SIZE);
+        log_info("[CLOUD] ota.start 目标槽 = %c (当前 %c)\r\n",
+                 (tgt == 0u) ? 'A' : 'B', (tgt == 0u) ? 'B' : 'A');
+    }
+#endif
+
     if (!ota_http_start(url, md5hex, size, version))
     {
         ota_http_get_status(&st);

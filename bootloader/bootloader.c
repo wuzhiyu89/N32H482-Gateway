@@ -11,6 +11,7 @@
  *             (逐 double word 不需要 RAM 缓冲, bootloader RAM 紧张)
  */
 #include "bootloader.h"
+#include "ota_boot.h"
 #include "n32h47x_48x_flash.h"
 #include "n32h47x_48x.h"          /* SCB, NVIC_SystemReset */
 #include <string.h>
@@ -275,10 +276,10 @@ bool bl_do_transfer(void)
  *   5. 跳转到 Reset_Handler(向量表[1])
  */
 
-void bl_jump_app(void)
+static bool bl_jump_try(uint32_t app_base)
 {
     /* 读向量表 */
-    uint32_t *vt = (uint32_t *)BL_APP_ADDR;
+    uint32_t *vt = (uint32_t *)app_base;
     uint32_t msp = vt[0];
     uint32_t reset_handler = vt[1];
 
@@ -286,16 +287,15 @@ void bl_jump_app(void)
      * RAM 范围: N32H482 0x20000000~0x2002FFFF (192KB)
      * Flash 范围: FM_FLASH_BASE ~ FM_FLASH_END */
     if ((msp < 0x20000000U) || (msp >= 0x20030000U) ||
-        (reset_handler < FM_FLASH_BASE) || (reset_handler >= FM_FLASH_END))
+        (reset_handler < app_base) || (reset_handler >= (app_base + BL_APP_MAX_SIZE)))
     {
-        /* 向量表坏了 —— 不要跳, 死循环等 WDT(若启用)或手动复位 */
-        for (;;) { __NOP(); }
+        return false;   /* 这个槽的向量表不可信 */
     }
 
     __disable_irq();
 
     /* 重定向向量表, ARM 手册要求: 设置 VTOR 后执行 DSB+ISB 再使用新向量表 */
-    SCB->VTOR = BL_APP_ADDR;
+    SCB->VTOR = app_base;
     __DSB();
     __ISB();
 
@@ -307,26 +307,135 @@ void bl_jump_app(void)
         : "r"(msp), "r"(reset_handler | 1U)   /* |1 保证 Thumb 状态 */
         : "memory"
     );
+    return true;        /* 不会到这里 */
+}
+
+void bl_jump_app(void)
+{
+    if (!bl_jump_try(BL_APP_ADDR))
+    {
+        for (;;) { __NOP(); }   /* A 槽也坏: 停住等 J-Link */
+    }
+    for (;;) { __NOP(); }
 }
 
 /* ==================== 主入口 ==================== */
 
+static bool bl_boot_load(ota_boot_rec_t *out)
+{
+    ota_boot_rec_t rec;
+    ota_boot_rec_t best;
+    bool           found = false;
+    uint32_t       i;
+
+    if (out == NULL) { return false; }
+
+    for (i = 0u; i < OTA_BOOT_SLOTS; i++)
+    {
+        bl_flash_read(BL_META_ADDR + OTA_BOOT_REGION_OFFSET + i * OTA_BOOT_REC_SZ,
+                      (uint8_t *)&rec, (uint16_t)sizeof(rec));
+        if (rec.magic != OTA_BOOT_MAGIC) { continue; }
+        if ((rec.active > 1u) ||
+            ((rec.pending > 1u) && (rec.pending != OTA_BOOT_SLOT_NONE)) ||
+            (rec.confirmed > 1u) || (rec.tries > OTA_BOOT_TRIES_INIT))
+        {
+            continue;
+        }
+        if (rec.crc != (bl_crc32_update(0xFFFFFFFFU, (const uint8_t *)&rec, 12u) ^ 0xFFFFFFFFU))
+        {
+            continue;
+        }
+        if ((!found) || (rec.seq > best.seq)) { best = rec; found = true; }
+    }
+
+    if (found) { *out = best; }
+    return found;
+}
+
+static bool bl_boot_save(const ota_boot_rec_t *rec)
+{
+    ota_boot_rec_t w;
+    ota_boot_rec_t cur;
+    uint32_t       i;
+
+    w = *rec;
+    w.magic = OTA_BOOT_MAGIC;
+    (void)memset(w.rsv, 0, sizeof(w.rsv));
+    w.crc = bl_crc32_update(0xFFFFFFFFU, (const uint8_t *)&w, 12u) ^ 0xFFFFFFFFU;
+
+    for (i = 0u; i < OTA_BOOT_SLOTS; i++)
+    {
+        uint32_t addr = BL_META_ADDR + OTA_BOOT_REGION_OFFSET + i * OTA_BOOT_REC_SZ;
+        uint16_t j;
+        bool     erased = true;
+
+        bl_flash_read(addr, (uint8_t *)&cur, (uint16_t)sizeof(cur));
+        for (j = 0u; j < sizeof(cur); j++)
+        {
+            if (((const uint8_t *)&cur)[j] != 0xFFu) { erased = false; break; }
+        }
+        if (!erased) { continue; }
+
+        /* 32B = 4 个 double word */
+        for (j = 0u; j < 4u; j++)
+        {
+            const uint32_t *p = (const uint32_t *)((const void *)&w) + (j * 2u);
+            if (!bl_flash_write_dw(addr + (uint32_t)j * 8u, p[0], p[1])) { return false; }
+        }
+        return true;
+    }
+
+    return false;       /* 槽满: 不擦页, fail-safe */
+}
+
 void bl_run(void)
 {
-    ota_mark_t mk;
+    ota_boot_rec_t r;
+    ota_mark_t     mk;
 
-    /* 检测标记 */
+    /* 新方案: 启动记录决定从哪个槽启动 */
+    if (bl_boot_load(&r))
+    {
+        if ((r.pending == OTA_BOOT_SLOT_A) || (r.pending == OTA_BOOT_SLOT_B))
+        {
+            if (r.tries > 0u)
+            {
+                /* 先扣次数再跳: 新固件即使立刻崩, 下次也少一次机会 */
+                r.tries--;
+                (void)bl_boot_save(&r);
+
+                if (bl_jump_try(ota_boot_slot_base(r.pending)))
+                {
+                    for (;;) { __NOP(); }       /* 不会返回 */
+                }
+                /* 向量表坏了: 当失败, 走下面的回退 */
+            }
+
+            /* 机会用完 / 镜像无效 -> 回退到 active, 清 pending */
+            r.pending = OTA_BOOT_SLOT_NONE;
+            r.tries   = 0u;
+            (void)bl_boot_save(&r);
+
+            if (bl_jump_try(ota_boot_slot_base(r.active)))
+            {
+                for (;;) { __NOP(); }
+            }
+            for (;;) { __NOP(); }               /* active 也坏: 等 J-Link */
+        }
+
+        if (bl_jump_try(ota_boot_slot_base(r.active)))
+        {
+            for (;;) { __NOP(); }
+        }
+        for (;;) { __NOP(); }
+    }
+
+    /* 没有启动记录: 兼容旧路径(OTAV 标记 -> B 搬 A) */
     if (!bl_check_mark(&mk))
     {
-        /* 无有效 OTA 升级 —— 直接跳当前 app */
         bl_jump_app();
         return;
     }
-
-    /* 标记有效, 执行搬运流程(成功则跳 app, 失败也会清标记后跳 app) */
-    bl_do_transfer();   /* 成功不返回, 失败返回 */
-
-    /* 搬运失败 —— 清标记防止下次循环, 跳 app */
-    /* (bl_do_transfer 失败时内部已经清过标记了, 这里再兜底一次) */
+    bl_do_transfer();
     bl_jump_app();
 }

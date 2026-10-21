@@ -621,7 +621,7 @@ static void test_status_data(void)
     n = cloud_proto_build_status_data(buf, (uint16_t)sizeof(buf), &st);
     CHECK(n > 0u, "生成成功 n=%u", (unsigned)n);
     CHECK(strcmp(buf,
-                 "{\"online\":true,\"fwVersion\":\"1.0.0\",\"configVersion\":7,"
+                 "{\"online\":true,\"fwVersion\":\"1.0.0\",\"slot\":\"A\",\"configVersion\":7,"
                  "\"rsrp\":-85,\"uptimeSeconds\":3600,\"mode\":\"auto\","
                  "\"currentGear\":2,\"sensorsOnline\":2,\"sensorsTotal\":2,"
                  "\"devicesOnline\":1,\"devicesTotal\":1}") == 0,
@@ -1877,6 +1877,47 @@ static void test_set_entry(void)
     CHECK(config_store_get()->sensors[0].report_period_s == 300u,
           "★ 投递失败也不影响配置落盘");
     fake_sensor_param_ret = 1;
+
+    /* =================================================================
+     * ★2026-10-21: 云端改用 cfg.set(sensors[]) 控制传感器 ★
+     *   sensors[] 里显式给了 reportPeriodSeconds 时, 必须与 sen.set 同口径:
+     *   落盘成功后把新周期以 0x01 下发给传感器本身(否则设备仍按旧周期上报,
+     *   网关按新周期判失联 -> 误报离线)。
+     *   没给 reportPeriodSeconds 的则一次都不下发。
+     * ================================================================= */
+    {
+        char     req[512];
+        uint32_t v = config_store_version();
+
+        fake_lora_business_reset();
+        (void)snprintf(req, sizeof(req),
+                       "{\"cmd\":\"cfg.set\",\"msgId\":\"cs1\",\"ts\":1,\"data\":"
+                       "{\"expectVersion\":%u,\"sections\":{\"sensors\":["
+                       "{\"uid\":\"21000000000000000000000001\",\"reportPeriodSeconds\":240}]}}}",
+                       (unsigned)v);
+        rc = cloud_proto_handle(req, 1u, s_big_resp, (uint16_t)sizeof(s_big_resp), &rl);
+        CHECK(rc == CLOUD_EC_OK, "cfg.set sensors 改上报周期 -> 成功 (rc=%d)", rc);
+        CHECK(fake_sensor_param_calls == 1,
+              "★ cfg.set 也调了 0x01 下发 1 次(实际 %d)", fake_sensor_param_calls);
+        CHECK(fake_sensor_param_report_s == 240u,
+              "★ cfg.set 的周期原样透传 (实际 %u)", (unsigned)fake_sensor_param_report_s);
+        CHECK(config_store_get()->sensors[0].report_period_s == 240u,
+              "★ 网关侧配置也生效了");
+
+        /* ---- 只改 name: 不下发设备 ---- */
+        v = config_store_version();
+        fake_lora_business_reset();
+        (void)snprintf(req, sizeof(req),
+                       "{\"cmd\":\"cfg.set\",\"msgId\":\"cs2\",\"ts\":1,\"data\":"
+                       "{\"expectVersion\":%u,\"sections\":{\"sensors\":["
+                       "{\"uid\":\"21000000000000000000000001\",\"name\":\"只改名字\"}]}}}",
+                       (unsigned)v);
+        rc = cloud_proto_handle(req, 1u, s_big_resp, (uint16_t)sizeof(s_big_resp), &rl);
+        CHECK(rc == CLOUD_EC_OK, "cfg.set sensors 只改 name -> 成功 (rc=%d)", rc);
+        CHECK(fake_sensor_param_calls == 0,
+              "★ 没给 reportPeriodSeconds 时一次都不下发(实际 %d 次)",
+              fake_sensor_param_calls);
+    }
 }
 
 /* =================================================================
