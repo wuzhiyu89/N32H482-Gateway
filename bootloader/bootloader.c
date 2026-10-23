@@ -312,10 +312,29 @@ static bool bl_jump_try(uint32_t app_base)
 
 void bl_jump_app(void)
 {
-    if (!bl_jump_try(BL_APP_ADDR))
+    if (bl_jump_try(BL_APP_ADDR))
     {
-        for (;;) { __NOP(); }   /* A 槽也坏: 停住等 J-Link */
+        for (;;) { __NOP(); }       /* 不会返回 */
     }
+
+#if (FM_HAS_SLOT_B != 0)
+    /* ★2026-10-23 P0: A 槽起不来时, 再试 B 槽, 不要立刻死等 J-Link。
+     *
+     * 以前这里只有"跳 A, 失败就 for(;;)"。而最容易被触发的场景恰好是:
+     *   正在跑 B -> 发起 OTA(目标槽 = A, 先擦掉) -> 标记页被擦(启动记录一起没了)
+     *   -> 下载失败/中止/掉电 -> 重启 -> 没有记录 -> 跳 A -> A 是空白 -> 卡死。
+     * 此时 B 里明明还躺着一份【完整可跑】的旧固件, 却因为只试了 A 而变砖。
+     *
+     * 现在按 A -> B 的顺序把两个槽都验一遍向量表, 只要有一个合法就起来。
+     * 这只影响"记录丢失/记录指向的槽损坏"这种异常路径; 正常路径仍由
+     * bl_run 的启动记录决定, 语义不变。 */
+    if (bl_jump_try((uint32_t)FM_SLOT_B_ADDR))
+    {
+        for (;;) { __NOP(); }
+    }
+#endif
+
+    /* 两个槽的向量表都不可信: 只能停住等 J-Link */
     for (;;) { __NOP(); }
 }
 
@@ -416,27 +435,22 @@ void bl_run(void)
             r.pending = OTA_BOOT_SLOT_NONE;
             r.tries   = 0u;
             (void)bl_boot_save(&r);
-
-            if (bl_jump_try(ota_boot_slot_base(r.active)))
-            {
-                for (;;) { __NOP(); }
-            }
-            for (;;) { __NOP(); }               /* active 也坏: 等 J-Link */
+            /* ★2026-10-23: 这里原来紧跟一句"active 也坏 -> for(;;) 等 J-Link"。
+             *   但"另一个槽可能是好的"是真实存在的(升级刚写好 B, 而 active
+             *   记的是已被擦掉的 A) ⇒ 不再就地卡死, 落到下面统一的 A->B 兜底。 */
         }
 
         if (bl_jump_try(ota_boot_slot_base(r.active)))
         {
-            for (;;) { __NOP(); }
+            for (;;) { __NOP(); }               /* 不会返回 */
         }
-        for (;;) { __NOP(); }
     }
 
-    /* 没有启动记录: 兼容旧路径(OTAV 标记 -> B 搬 A) */
-    if (!bl_check_mark(&mk))
+    /* 没有启动记录, 或记录指向的槽都起不来:
+     * 兼容旧路径(OTAV 标记 -> B 搬 A), 最后由 bl_jump_app 按 A -> B 逐个试。 */
+    if (bl_check_mark(&mk))
     {
-        bl_jump_app();
-        return;
+        bl_do_transfer();       /* 内部最后会调 bl_jump_app, 正常不返回 */
     }
-    bl_do_transfer();
     bl_jump_app();
 }
