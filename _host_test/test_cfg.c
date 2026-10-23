@@ -349,12 +349,13 @@ static void test_defaults_for_partial_elements(void)
     CHECK(config_store_from_json(&c,
         "{\"sensors\":[{\"uid\":\"21000000000000000000000001\"}]}") == CFG_OK, "只给 uid 的传感器可解析");
     CHECK(c.sensor_count == 1, "1 个传感器");
-    CHECK(c.sensors[0].report_period_s == 60, "reportPeriodSeconds 缺省 -> 60");
-    CHECK(c.sensors[0].offline_timeout_s == 90, "offlineTimeoutSeconds 缺省 -> 90");
+    CHECK(c.sensors[0].report_period_s == 300, "reportPeriodSeconds 缺省 -> 300");
+    CHECK(c.sensors[0].offline_timeout_s == 900, "offlineTimeoutSeconds 缺省 -> 900");
+    CHECK(c.sensors[0].low_battery_pct == 80, "lowBatteryPercent 缺省 -> 80");
     CHECK(c.sensors[0].enabled == 1, "enabled 缺省 -> true");
     CHECK(c.sensors[0].measure_mode == CFG_MEASURE_LEVEL, "measureMode 缺省 -> level");
     CHECK(config_store_validate(&c) == CFG_OK,
-          "文档默认 60/90 能通过校验(见下条说明)");
+          "默认 300/900/80 能通过校验");
 
     /* 设备只给 uid+type, 其余缺 */
     CHECK(config_store_from_json(&c,
@@ -649,9 +650,10 @@ static void test_merge_sections_core(void)
     CHECK(config_store_merge_sections(&c,
               "{\"sensors\":[{\"uid\":\"21000000000000000000000003\"}]}", &res) == CFG_OK, "追加一台新传感器 -> OK");
     CHECK(c.sensor_count == 3u && strcmp(c.sensors[2].uid, "21000000000000000000000003") == 0, "210003 已追加到末尾");
-    CHECK(c.sensors[2].report_period_s == 60u && c.sensors[2].offline_timeout_s == 90u &&
+    CHECK(c.sensors[2].report_period_s == 300u && c.sensors[2].offline_timeout_s == 900u &&
+          c.sensors[2].low_battery_pct == 80u &&
           c.sensors[2].enabled == 1u,
-          "追加的传感器先铺文档默认值(60/90/true)");
+          "追加的传感器先铺默认值(300/900/80/true)");
 
     /* ---- 容量满: 追加到上限(5)之后再加必须【整域拒绝】, 且 *c 不被改坏 ---- */
     /* 上限从 3 改成 5 之后, 上面那台 210003 只是第 3 台, 还不到上限 —— 先补满 */

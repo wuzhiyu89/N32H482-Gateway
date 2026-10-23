@@ -233,10 +233,10 @@ typedef struct
     uint8_t  enabled;
     uint16_t install_height_cm;         /* 0~2000; D-1 决策后为死配置 */
     int16_t  calib_offset_mm;           /* -5000~+5000; D-1 决策后为死配置 */
-    uint16_t report_period_s;           /* 5~3600, 默认 60  */
-    uint8_t  low_battery_pct;           /* 0 = 禁用; 用户决策 D-5: 按【百分比】不按 mV */
+    uint16_t report_period_s;           /* 5~3600, 绑定默认 300 */
+    uint8_t  low_battery_pct;           /* 0 = 禁用, 绑定默认 80; 用户决策 D-5: 按【百分比】不按 mV */
     uint8_t  reserved0;
-    uint16_t offline_timeout_s;         /* 默认 90; 硬性要求 > report_period_s */
+    uint16_t offline_timeout_s;         /* 绑定默认 900; 仅记录, 失联判定用 3×report_period_s */
 } cfg_sensor_t;
 
 /** 3.4 thresholds (立即生效) */

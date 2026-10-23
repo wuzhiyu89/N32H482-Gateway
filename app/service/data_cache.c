@@ -106,6 +106,45 @@ void data_cache_down_del_by_uid(uint8_t *uid)
     }
 }
 
+/* ★2026-10-23 P1: "删之前先确认缓存里还是刚发出去的那一条"★
+ *
+ * 【为什么需要】声光(0x03)是三段式: 0x80 收到 -> 等约 10 秒 -> 0x82 执行结果。
+ * 这 10 秒里云端完全可能又下发一条新档位, 覆盖掉同一个 uid 的缓存条目
+ * (缓存是"每台一条", 后到的直接顶掉前一条)。
+ * 老代码在收到 0x82 时【无条件】按 uid 删缓存 —— 于是那条【新指令】被连带删掉:
+ * 平台以为下发成功, 设备停在旧档位, 而且再也没有重试机会。
+ *
+ * 【现在的语义】只有"缓存的 func 和载荷与刚发出去的那条逐字节相同"才删。
+ * 不同 = 已经有更新的指令在排队, 保留它交给下一轮下发。 */
+bool data_cache_down_del_if_match(uint8_t *uid, uint8_t func, const uint8_t *data, uint8_t len)
+{
+    for(uint8_t i = 0; i < DATA_CACHE_DOWN_MAX_ITEM; i++)
+    {
+        cache_down_item_t *it = &g_cache_down_buf[i];
+
+        if(it->valid != true || (memcmp(it->dev_uid, uid, sizeof(((last_value_t*)0)->uid)) != 0))
+        {
+            continue;
+        }
+
+        /* payload[0] = func, payload[1..] = data */
+        if((it->pay_len != (uint8_t)(len + 1U)) || (it->payload[0] != func))
+        {
+            return false;           /* 已经是另一条指令了 -> 不删 */
+        }
+        if((len > 0U) && (data != NULL) &&
+           (memcmp(&it->payload[1], data, len) != 0))
+        {
+            return false;
+        }
+
+        memset(it, 0, sizeof(cache_down_item_t));
+        it->valid = false;
+        return true;
+    }
+    return false;                   /* 没这条(可能已被清掉) */
+}
+
 uint8_t data_cache_down_get_count(void)
 {
     uint8_t cnt = 0;

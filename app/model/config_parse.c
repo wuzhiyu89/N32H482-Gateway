@@ -224,8 +224,9 @@ static void cfg_sensor_defaults(cfg_sensor_t *s)
 {
     (void)memset(s, 0, sizeof(*s));
     s->measure_mode      = CFG_MEASURE_LEVEL;   /* level */
-    s->report_period_s   = 60u;
-    s->offline_timeout_s = 90u;                 /* 对齐 Worker SensorOfflineTimeoutSeconds */
+    s->report_period_s   = 300u;                /* 与绑定默认一致 */
+    s->offline_timeout_s = 900u;                /* 3 倍上报周期 */
+    s->low_battery_pct   = 80u;                 /* 电量 ≤80% 上报 low_voltage */
     s->enabled           = 1u;
 }
 

@@ -630,20 +630,32 @@ uint32_t cj_get_uint(const char *json, const char *path, uint32_t def)
 
 bool cj_get_bool(const char *json, const char *path, bool def)
 {
-    char buf[8];
+    char      buf[8];
+    cj_type_t t = cj_get(json, path, buf, (uint16_t)sizeof(buf));
 
-    if (cj_get(json, path, buf, (uint16_t)sizeof(buf)) != CJ_BOOL)
+    if (t == CJ_BOOL)
     {
+        if (strcmp(buf, "true") == 0)
+        {
+            return true;
+        }
+        if (strcmp(buf, "false") == 0)
+        {
+            return false;
+        }
         return def;
     }
-    if (strcmp(buf, "true") == 0)
+
+    /* ★2026-10-23 P1: 头文件(cj_get_bool 的注释)承诺"接受 true/false 以及 0/1",
+     *   但这里以前只认字面量 true/false, 数字直接落到末尾 return def。
+     *   于是平台下发 {"enabled":0} / {"keepNetwork":0} 会被当成【默认值】,
+     *   而调用方给的默认值基本都是 true ⇒ "关不掉", 且没有任何日志提示。
+     *   现在数字按"非 0 即真"解释。 */
+    if (t == CJ_NUM)
     {
-        return true;
+        return (cj_get_uint(json, path, def ? 1u : 0u) != 0u);
     }
-    if (strcmp(buf, "false") == 0)
-    {
-        return false;
-    }
+
     return def;
 }
 

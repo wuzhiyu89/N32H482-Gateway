@@ -267,14 +267,7 @@
 #else  /* ★ 甲方平台(2026-10-08 起的目标 broker) ★ */
 /* 【broker 地址】甲方平台 223.75.207.139。
  *
- * 【端口为什么是 1883 而不是 18083 —— 实测证据, 不要改回去】
- *   甲方给的地址写的是 `223.75.207.139:18083`, 但现场实测(2026-10-08):
- *     · 对 18083 发 MQTT CONNECT  -> 收到 0 字节
- *     · HTTP GET http://223.75.207.139:18083/ -> 200 OK, server: Cowboy,
- *       <title>EMQX Dashboard</title>            <- 【18083 是 EMQX 控制台网页端口】
- *     · 对 1883  发 MQTT CONNECT  -> 收到 20 02 00 00 = CONNACK rc=0(连接被接受)
- *   ⇒ 18083 是 Dashboard(HTTP), 【不是 MQTT】。用 18083 模组必然连不上。
- *   若甲方确实把 MQTT 挪到了别的端口, 只改下面这一行的字符串即可。 */
+ */
 #ifndef G4_MQTT_HOST
 #define G4_MQTT_HOST             "223.75.207.139"
 #endif
@@ -671,8 +664,19 @@ static uint8_t      g_step;
 static uint32_t     g_wait_tick;
 /* 运行期拼出来的 AT 命令(AT+CGDCONT / AT+CGACT / AT+CGPADDR / AT+MQTTCONN...)。
  * 【必须用静态缓冲】: 非阻塞命令引擎会在多个主循环拍里持续用这条命令, 放在
- * case 的局部数组里, 下一拍就是未初始化的栈 —— 会发出乱码命令。 */
-static char         g_tx_cmd[192];
+ * case 的局部数组里, 下一拍就是未初始化的栈 —— 会发出乱码命令。
+ *
+ * ★2026-10-23 P1: 原来是 192 字节, 装不下最长的 AT+MQTTCONN★
+ *   模板: AT+MQTTCONN=<id>,"<host>",<port>,"<cid>","<user>","<pass>"
+ *   字面量 25 字符 + 结尾 '\0' = 26, 再叠加各字段上限:
+ *       connect_id 1 + host 79 + port 7 + cid 39 + user 39 + pass 79 = 244
+ *   合计 270 —— 已经超过 192。而配置(network.host / mqttUser / mqttPassword)
+ *   是由云端下发的, 用户填满就必然触发 mqtt_build_conn_cmd() 返回 false,
+ *   调用方直接进 G4_STATE_ERROR -> 退避重连 -> 再失败, 也就是"永远连不上,
+ *   日志只有一句 MQTTCONN 命令组装失败"。这种死循环现场极难往"缓冲太短"上想。
+ *   下面 830 行附近有一条 _Static_assert 用真实字段上限把这个下界钉死。 */
+#define G4_TX_CMD_MAX   288u
+static char         g_tx_cmd[G4_TX_CMD_MAX];
 
 /* ---- CFUN(射频功能档位) ----
  * 建链时读一次 AT+CFUN? 记在这里, 并打进状态行。
@@ -832,6 +836,17 @@ static char g_broker_pass[G4_BROKER_PASS_MAX] = G4_MQTT_PASS;
  * main.c 会用 `network.clientId` 注入(空 = 不改, 用编译期默认)。 */
 #define G4_CLIENT_ID_MAX   40
 static char g_client_id[G4_CLIENT_ID_MAX] = G4_MQTT_CLIENT_ID;
+
+/* ★2026-10-23: 把 "g_tx_cmd 装得下最长的 AT+MQTTCONN" 这件事交给编译器盯★
+ * 26 = "AT+MQTTCONN=" (12) + 模板里其余字面量 (13) + 结尾 '\0' (1)
+ * 以后谁把 mqttUser / host 的字段上限调大, 这里会直接编译失败, 而不是变成
+ * 现场"建链永远失败、日志只有一行组装失败"。 */
+_Static_assert((G4_TX_CMD_MAX >=
+                (26u + 1u                                       /* connect_id */
+                 + (G4_BROKER_HOST_MAX - 1u) + (G4_BROKER_PORT_MAX - 1u)
+                 + (G4_CLIENT_ID_MAX   - 1u) + (G4_BROKER_USER_MAX - 1u)
+                 + (G4_BROKER_PASS_MAX - 1u))),
+               "g_tx_cmd too small for the longest AT+MQTTCONN");
 
 static g4_pub_item_t g_pub_q[G4_PUB_QUEUE_DEPTH];    /* 排队等着发的 */
 static uint8_t       g_pub_q_cnt;

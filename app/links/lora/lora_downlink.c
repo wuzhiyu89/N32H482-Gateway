@@ -27,6 +27,36 @@
 #include "config_store.h"
 #include "log.h"
 
+/* ==================== 0x01 液位参数载荷(18 字节) ====================
+ *  [0-2]  上报间隔 秒(小端 24 位)      [3]    相同液位上报(固定 1)
+ *  [4-5]  液位告警阈值 mm(小端)         [6]    测量模式(0=液位 1=距离)
+ *  [7-8]  安装高度 cm(小端)            [9-10] 校准偏移 mm(int16 小端)
+ *  [11]   低电量阈值 %(0=禁用)
+ *  [12-17] 年 月 日 周 时 分(网关在发送时刻填)
+ *
+ * ★2026-10-22 协议改版★
+ *   · 取消"检测间隔"字段(原 [0-1]);
+ *   · "上报间隔"由 2 字节扩到 3 字节(上限 16777215 秒);
+ *   · "相同液位是否上报"固定为 1(字段保留, 不再由调用方决定);
+ *   · "周"不再固定填 5 —— g4_at_get_clock() 已按年月日算出真实星期
+ *     (1=周一 .. 7=周日), 直接用 clk.week;
+ *   · 新增测量模式/安装高度/校准偏移/低电量阈值, 由设备自己应用
+ *     (2026-10-22 用户决策: 测量类参数下发设备, 不在网关换算)。
+ * 云端下发的原始帧只需前 12 字节(不含校时), 网关补齐 [12..17]。 */
+#define LORA_SENSOR_PARAM_LEN       18U
+#define LORA_SENSOR_PARAM_TIME_OFF  12U
+
+/* 0x01 的一次完整参数(两条入口都先填成这个结构, 再走同一个落地点) */
+typedef struct
+{
+    uint32_t report_s;             /* 上报间隔 秒                    */
+    uint16_t thresh_mm;            /* 液位告警阈值 mm                 */
+    uint8_t  measure_mode;         /* cfg_measure_mode_t(0 液位 1 距离) */
+    uint16_t install_height_cm;    /* 安装高度 cm                    */
+    int16_t  calib_offset_mm;      /* 校准偏移 mm(可为负)             */
+    uint8_t  low_battery_pct;      /* 低电量阈值 %, 0 = 禁用          */
+} lora_sensor_params_t;
+
 bool lora_tx_downlink(uint8_t idx)
 {
     lora_slave_t *s = &g_slave_list[idx];
@@ -104,27 +134,29 @@ static int lora_try_send_downlink(uint8_t idx)
      *   时间是【网关 lora 发送数据时】向 4G 模块取来组帧的。
      *
      *   为什么不能沿用"收到云端下行时"取的那个时间戳:
-     *   液位是休眠设备, 上报间隔最长可配到 65535 秒(≈18.2 小时) —— 云端完全可能在
+     *   液位是休眠设备, 上报间隔最长可配到 16777215 秒 —— 云端完全可能在
      *   它上报前很久就把参数发下来了。用那时的时间戳会把设备 RTC 校偏那么久。
      *
      *   取不到怎么办: 【沿用缓存里的旧值】并告警, 而不是把这条指令丢掉 ——
      *   时间戳略旧也好过"参数永远下不去"。
      *
-     *   载荷布局(与设备端 app_cmd.h 一致, 共 13 字节, 16 位字段低字节在前):
-     *     [0-1] 检测间隔 [2-3] 上报间隔 [4] 相同液位上报表 [5-6] 阈值
-     *     [7]年 [8]月 [9]日 [10]周 [11]时 [12]分          <- 这 6 字节是网关补的 */
-    if ((s->pending_func == LORA_FUNC_SET_SENSOR_PARAM) && (s->pending_data_len >= 13U))
+     *   载荷布局(与设备端 app_cmd.h 一致, 共 18 字节, 16 位字段低字节在前):
+     *     [0-2] 上报间隔(小端 24 位) [3] 相同液位上报 [4-5] 阈值 mm
+     *     [6] 测量模式 [7-8] 安装高度 cm [9-10] 校准偏移 mm [11] 低电量阈值%
+     *     [12]年 [13]月 [14]日 [15]周 [16]时 [17]分  <- 这 6 字节是网关补的 */
+    if ((s->pending_func == LORA_FUNC_SET_SENSOR_PARAM) &&
+        (s->pending_data_len >= LORA_SENSOR_PARAM_LEN))
     {
         g4_clock_t clk;
 
         if (g4_at_get_clock(&clk))
         {
-            s->pending_data[7]  = clk.year;
-            s->pending_data[8]  = clk.month;
-            s->pending_data[9]  = clk.day;
-            s->pending_data[10] = clk.week;     /* 4G 应答里没有星期, 固定周五(5) */
-            s->pending_data[11] = clk.hour;
-            s->pending_data[12] = clk.minute;
+            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 0U] = clk.year;
+            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 1U] = clk.month;
+            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 2U] = clk.day;
+            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 3U] = clk.week;  /* 1=周一 .. 7=周日 */
+            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 4U] = clk.hour;
+            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 5U] = clk.minute;
 
             log_info("[GW] 0x01 校时按【发送时刻】重取: 20%02u-%02u-%02u w%u %02u:%02u\r\n",
                      (unsigned)clk.year, (unsigned)clk.month, (unsigned)clk.day,
@@ -134,8 +166,9 @@ static int lora_try_send_downlink(uint8_t idx)
         {
             log_info("[GW] !! 发送前取不到 4G 时间(AT+CCLK?), 沿用缓存里的旧校时 "
                      "20%02u-%02u-%02u 继续下发\r\n",
-                     (unsigned)s->pending_data[7], (unsigned)s->pending_data[8],
-                     (unsigned)s->pending_data[9]);
+                     (unsigned)s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 0U],
+                     (unsigned)s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 1U],
+                     (unsigned)s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 2U]);
         }
     }
 
@@ -221,10 +254,18 @@ void lora_downlink_logic(void)
         s->retry_cnt++;
         if (s->retry_cnt > LORA_MAX_RETRY)
         {
-            /* 重传耗尽: 丢弃下发缓存, 回到 IDLE(不会再被 lora_try_send_alarm_idle 捡起来重发) */
+            /* 重传耗尽: 丢弃下发缓存, 回到 IDLE(不会再被 lora_try_send_alarm_idle 捡起来重发)
+             * ★2026-10-23: 改成条件删除 —— 重传窗口内云端可能已经下发了一条新指令,
+             *   按 uid 无条件删会把那条新的也删掉, 等于静默丢掉云端的最新命令。
+             *   不匹配(= 有更新的)就保留, 状态已回 IDLE, 下一拍会被正常捡起来发。 */
             s->state     = SLAVE_STATE_IDLE;
             s->retry_cnt = 0U;
-            data_cache_down_del_by_uid(s->dev_uid);
+            if (!data_cache_down_del_if_match(s->dev_uid, s->pending_func,
+                                              s->pending_data, s->pending_data_len))
+            {
+                log_info("[GW] %02X%02X%02X 重传耗尽, 但缓存已是更新的指令 -> 保留待发\r\n",
+                         s->dev_uid[0], s->dev_uid[1], s->dev_uid[2]);
+            }
 
             log_info("[GW] !! %02X%02X%02X 连发 %u 次没等到 ACK, 丢弃这条下发指令"
                      "(要重发请从云端再下发)\r\n",
@@ -274,9 +315,17 @@ void lora_try_send_alarm_idle(void)
         if (g_slave_list[i].state == SLAVE_STATE_IDLE &&
             g_slave_list[i].dev_type == SLAVE_TYPE_ALARM_OUT)
         {
-            lora_try_send_downlink(i);
-            /* 发了一台就停, 该从机进入 WAIT_ACK, 下次周期再发下一台 */
-            break;
+            /* ★2026-10-23 P1: 以前这里是无条件 break —— 只要扫到第一台
+             *   "IDLE 的声光报警器" 就停, 不管它到底有没有指令要发。
+             *   于是第 1 台空闲(缓存里没它的事)时, 第 2 台起的待下发指令
+             *   永远轮不到, 表现是"多台声光报警器只联动其中一台"。
+             *   改成"真的发出去了才停"(那里会进 WAIT_ACK, 下个周期发下一台);
+             *   没缓存/载荷坏就继续看下一台。 */
+            if (lora_try_send_downlink(i) == DOWNLINK_SENT)
+            {
+                /* 发了一台就停, 该从机进入 WAIT_ACK, 下次周期再发下一台 */
+                break;
+            }
         }
     }
 }
@@ -438,21 +487,17 @@ void lora_reply_logic(void)
  *   (2026-09 早期版本用的是 ASCII hex 文本承载, 现在云端已改成原始二进制;
  *    代码里 hex 分支保留做兼容 —— 只有 payload 不是 AA55 开头时才走它。)
  *
- *   线上收到的 payload 格式就是这 20 个字节(CRC 已按协议重算):
- *     AA 55 01 11 00 01 21 00 01 01 07 05 00 0A 00 00 DC 05 98 E0
- *   对应的帧:
- *     AA 55 | 01 | 11 00 01 | 21 00 01 | 01 | 07 | 05 00 0A 00 00 DC 05 | 98 E0
- *     └头┘  ver  └─ 网关 ─┘  └─ 设备 ─┘  fc  dlen  └──── data 7B ────┘  └CRC┘
- *   ⚠️【2026-09 更正】原来这里写的是 ...DC 05 38 1B, 那个 CRC 是错的 ——
- *     现场抓包(见 _rev_GOOD_2026-09-22\v4...\说明.txt 第五节, 当时
- *     MAIN_LORA_ENABLE=0 只跑 4G, 所以没人校验过它)里云端发下来的就是
- *     38 1B。正确值是 98 E0; 照抄 38 1B 会让设备端 CRC 不过、整帧被丢弃,
- *     现象就是"参数下发了但设备一直没同步时间(上报帧里月日时分全 00)"。
- *     算法: crc16_modbus(版本字节..data 末尾), 结果低字节在前。
+ *   线上收到的 payload 是云端自己拼好的 0x01 原始帧(帧头/版本/CRC 都要对),
+ *   但 data 只有【前 12 字节】, 不含校时:
+ *     [0-2] 上报间隔(小端 24 位) [3] 相同液位上报 [4-5] 阈值 mm(小端)
+ *     [6] 测量模式 [7-8] 安装高度 cm [9-10] 校准偏移 mm [11] 低电量阈值%
+ *   ⚠️【2026-10-22 改版】原格式是 7 字节(检测间隔 2B + 上报间隔 2B + ...),
+ *     现在取消检测间隔、上报间隔扩到 3 字节、载荷 18 字节, 旧帧会被判
+ *     "载荷不足 12 字节"丢弃。
  *
  * 转发规则(《液位监测系统通讯协议说明》第五节):
- *   1) 0x01(设置液位): 云端的 data 只有前 7 字节, 【没有】那 6 字节校时;
- *      网关转发前必须补上 年 月 日 周 时 分 —— 取自 AT+CCLK?, 星期固定填周五。
+ *   1) 0x01(设置液位): 网关转发前必须补上 年 月 日 周 时 分(共 18 字节)——
+ *      时间取自 AT+CCLK?, 星期用日期算出的真实值(1=周一 .. 7=周日)。
  *   2) 0x03(设置声光): 一个字节都不改, 直接打包转发。
  *   3) 0x02 是【上行】功能码, 云端不会下发; 0x80/0x81 若收到只当"云端应答"记一笔。
  */
@@ -467,9 +512,10 @@ void lora_reply_logic(void)
  *     现在: 协议字段=秒,   网关原样转发, 设备端按秒直接用 —— 谁都不换算。
  *     任何一侧漏改 => 时间差 60 倍(平台 5 分钟 -> 设备 5 小时)。
  *
- *   16 位字段上限 65535 秒 ≈ 18.2 小时; 平台侧 reportPeriodSeconds 的配置范围
+ *   24 位字段上限 16777215 秒(≈194 天); 平台侧 reportPeriodSeconds 的配置范围
  *   是 5~3600 秒(config_store_validate), 落在里面。 */
 #define LORA_SENSOR_PERIOD_MIN_S     1U      /* 间隔最小 1 秒 */
+#define LORA_SENSOR_PERIOD_MAX_S     0xFFFFFFUL  /* 24 位字段上限 */
 
 /* 液位传感器是【休眠】设备: 默认不立即发, 等它上报时搭车发。
  * 改成 1 就在收到下行后立刻发(只有它正好在接收窗口内才有意义)。 */
@@ -495,31 +541,39 @@ static void _downlink_drop(uint8_t func, const char *why)
  * 参数单位全部是【秒】(见上面的改版说明)。
  * 返回 0 成功; -1 载荷过长; -2 地址不在从机表; -3 间隔越界。
  */
-static int _sensor_params_commit(const uint8_t uid[CFG_UID_BYTES], uint16_t detect_s,
-                                 uint16_t report_s, bool same, uint16_t thresh_mm,
-                                 const char *src)
+static int _sensor_params_commit(const uint8_t uid[CFG_UID_BYTES],
+                                 const lora_sensor_params_t *p, const char *src)
 {
-    uint8_t    payload[13];
+    uint8_t    payload[LORA_SENSOR_PARAM_LEN];
     g4_clock_t clk;
     int        ret;
 
-    if ((detect_s < LORA_SENSOR_PERIOD_MIN_S) || (report_s < LORA_SENSOR_PERIOD_MIN_S))
+    if (p == NULL)
     {
-        log_info("[CLOUD->LoRa] !! 0x01(%s) 间隔越界(检测/上报都必须 >= %us): "
-                 "detect=%us report=%us\r\n",
-                 src, (unsigned)LORA_SENSOR_PERIOD_MIN_S,
-                 (unsigned)detect_s, (unsigned)report_s);
         return -3;
     }
 
-    /* 13 字节载荷, 16 位字段一律【低字节在前】, 间隔字段原样填秒值(不换算) */
-    payload[0]  = (uint8_t)(detect_s & 0xFFU);
-    payload[1]  = (uint8_t)((detect_s >> 8) & 0xFFU);
-    payload[2]  = (uint8_t)(report_s & 0xFFU);
-    payload[3]  = (uint8_t)((report_s >> 8) & 0xFFU);
-    payload[4]  = same ? 1U : 0U;
-    payload[5]  = (uint8_t)(thresh_mm & 0xFFU);
-    payload[6]  = (uint8_t)((thresh_mm >> 8) & 0xFFU);
+    if ((p->report_s < LORA_SENSOR_PERIOD_MIN_S) || (p->report_s > LORA_SENSOR_PERIOD_MAX_S))
+    {
+        log_info("[CLOUD->LoRa] !! 0x01(%s) 上报间隔越界(必须 %u~%lu 秒): report=%lu\r\n",
+                 src, (unsigned)LORA_SENSOR_PERIOD_MIN_S,
+                 (unsigned long)LORA_SENSOR_PERIOD_MAX_S, (unsigned long)p->report_s);
+        return -3;
+    }
+
+    /* 前 12 字节: 16/24 位字段一律【低字节在前】 */
+    payload[0]  = (uint8_t)(p->report_s & 0xFFU);
+    payload[1]  = (uint8_t)((p->report_s >> 8) & 0xFFU);
+    payload[2]  = (uint8_t)((p->report_s >> 16) & 0xFFU);
+    payload[3]  = 1U;                       /* 相同液位固定上报(字段保留, 值恒 1) */
+    payload[4]  = (uint8_t)(p->thresh_mm & 0xFFU);
+    payload[5]  = (uint8_t)((p->thresh_mm >> 8) & 0xFFU);
+    payload[6]  = (p->measure_mode != 0U) ? 1U : 0U;   /* 0=液位 1=距离 */
+    payload[7]  = (uint8_t)(p->install_height_cm & 0xFFU);
+    payload[8]  = (uint8_t)((p->install_height_cm >> 8) & 0xFFU);
+    payload[9]  = (uint8_t)((uint16_t)p->calib_offset_mm & 0xFFU);
+    payload[10] = (uint8_t)(((uint16_t)p->calib_offset_mm >> 8) & 0xFFU);
+    payload[11] = p->low_battery_pct;
 
     /* 校时(6 字节): 先按"现在"填一份。真正发出去之前 lora_try_send_downlink() 还会
      * 【再取一次刷新】——液位是休眠设备, 参数可能在它上报前很久就排好了队,
@@ -528,20 +582,26 @@ static int _sensor_params_commit(const uint8_t uid[CFG_UID_BYTES], uint16_t dete
      * (旧版这里是直接丢弃, 那会让 sen.set 在 4G 刚断开时静默失效)。 */
     if (g4_at_get_clock(&clk))
     {
-        payload[7]  = clk.year;  payload[8]  = clk.month; payload[9]  = clk.day;
-        payload[10] = clk.week;  payload[11] = clk.hour;  payload[12] = clk.minute;
+        payload[LORA_SENSOR_PARAM_TIME_OFF + 0U] = clk.year;
+        payload[LORA_SENSOR_PARAM_TIME_OFF + 1U] = clk.month;
+        payload[LORA_SENSOR_PARAM_TIME_OFF + 2U] = clk.day;
+        payload[LORA_SENSOR_PARAM_TIME_OFF + 3U] = clk.week;   /* 1=周一 .. 7=周日 */
+        payload[LORA_SENSOR_PARAM_TIME_OFF + 4U] = clk.hour;
+        payload[LORA_SENSOR_PARAM_TIME_OFF + 5U] = clk.minute;
 
-        log_info("[CLOUD->LoRa] 0x01(%s) 液位 %02X%02X%02X detect=%us report=%us "
-                 "same=%u thresh=%umm time=20%02u-%02u-%02u w%u %02u:%02u\r\n",
+        log_info("[CLOUD->LoRa] 0x01(%s) 液位 %02X%02X%02X report=%lus "
+                 "mode=%u height=%ucm offset=%dmm lowbat=%u%% thresh=%umm "
+                 "time=20%02u-%02u-%02u w%u %02u:%02u\r\n",
                  src, uid[0], uid[1], uid[2],
-                 (unsigned)detect_s, (unsigned)report_s, (unsigned)payload[4],
-                 (unsigned)thresh_mm,
+                 (unsigned long)p->report_s, (unsigned)payload[6],
+                 (unsigned)p->install_height_cm, (int)p->calib_offset_mm,
+                 (unsigned)p->low_battery_pct, (unsigned)p->thresh_mm,
                  (unsigned)clk.year, (unsigned)clk.month, (unsigned)clk.day,
                  (unsigned)clk.week, (unsigned)clk.hour, (unsigned)clk.minute);
     }
     else
     {
-        (void)memset(&payload[7], 0, 6U);
+        (void)memset(&payload[LORA_SENSOR_PARAM_TIME_OFF], 0, 6U);
         log_info("[CLOUD->LoRa] !! 0x01(%s) 现在取不到 4G 时间(AT+CCLK?), 校时先填 0"
                  "(真正发出前会再取一次)\r\n", src);
     }
@@ -554,61 +614,106 @@ static int _sensor_params_commit(const uint8_t uid[CFG_UID_BYTES], uint16_t dete
         /* 把真实原因分开报 —— 地址没登记和缓存满完全是两个方向的排查 */
         log_info("[CLOUD->LoRa] !! 0x01(%s) 投递失败: %s\r\n", src,
                  (ret == -2) ? "该地址不在固定从机表里(液位必须先在表里登记)" :
-                 (ret == -1) ? "载荷过长(>239字节)" : "下发缓存满/写入失败");
+                 (ret == -1) ? "载荷过长(>206字节)" : "下发缓存满/写入失败");
         return ret;
     }
     return 0;
 }
 
-/* ---------- 0x01 入口②: 平台 JSON(sen.set) ----------
- * 见 lora_business.h 的说明。单位【秒】, 不换算。 */
+/* 按 26 位 hex 串找配置里的液位传感器(找不到返回 NULL) */
+static const cfg_sensor_t *_sensor_cfg_by_uid(const char *uid_hex)
+{
+    const config_store_t *cfg = config_store_get();
+    uint8_t i;
+
+    if ((cfg == NULL) || (uid_hex == NULL)) { return NULL; }
+
+    for (i = 0u; (i < cfg->sensor_count) && (i < (uint8_t)CFG_SENSOR_MAX); i++)
+    {
+        if (strcmp(cfg->sensors[i].uid, uid_hex) == 0)
+        {
+            return &cfg->sensors[i];
+        }
+    }
+    return NULL;
+}
+
+/* ---------- 0x01 入口②: 平台 JSON(sen.set / cfg.set.sensors[]) ----------
+ * 参数一律取【已落盘】的配置: 平台改了哪个字段, 这里就带哪个字段下发,
+ * 不用调用方逐个透传, 也就不会出现"平台改了但下发还是旧值"。
+ * 单位【秒】, 不换算; 相同液位固定上报, 不再作为参数传入。 */
 bool lora_business_set_sensor_params(const char *uid_hex,
-                                     uint16_t detect_period_s,
-                                     uint16_t report_period_s,
-                                     bool     report_same_level,
+                                     uint32_t report_period_s,
                                      uint16_t alarm_thresh_mm)
 {
-    uint8_t uid[CFG_UID_BYTES];
+    uint8_t              uid[CFG_UID_BYTES];
+    const cfg_sensor_t  *s;
+    lora_sensor_params_t p;
 
     if (uid_hex == NULL) { return false; }
     if (!cfg_uid_to_bytes(uid_hex, uid))
     {
-        log_info("[CLOUD->LoRa] !! sen.set: uid \"%s\" 不是合法的 6 位 hex 串\r\n", uid_hex);
+        log_info("[CLOUD->LoRa] !! sen.set: uid \"%s\" 不是合法的 26 位 hex 串\r\n", uid_hex);
         return false;
     }
-    return (_sensor_params_commit(uid, detect_period_s, report_period_s,
-                                  report_same_level, alarm_thresh_mm, "sen.set") == 0);
+
+    (void)memset(&p, 0, sizeof(p));
+    p.report_s   = report_period_s;
+    p.thresh_mm  = alarm_thresh_mm;
+
+    s = _sensor_cfg_by_uid(uid_hex);
+    if (s != NULL)
+    {
+        p.measure_mode      = s->measure_mode;
+        p.install_height_cm = s->install_height_cm;
+        p.calib_offset_mm   = s->calib_offset_mm;
+        p.low_battery_pct   = s->low_battery_pct;
+    }
+    else
+    {
+        /* 不在配置里: 发送时会被"地址不在从机表"挡下, 这里只保证字段有定义 */
+        log_info("[CLOUD->LoRa] !! %s 不在 sensors[] 配置里, 0x01 的测量参数按 0 下发\r\n",
+                 uid_hex);
+    }
+
+    return (_sensor_params_commit(uid, &p, "sen.set") == 0);
 }
 
 /* ---------- 0x01 入口①: 云端直接下发的原始帧 ----------
  *
- * 云端 data(7 字节, 单位【秒】, 见上面的改版说明):
- *   off0-1 检测间隔(小端) off2-3 上报间隔(小端) off4 相同液位是否上报
- *   off5-6 液位告警阈值 mm(小端)
+ * 云端 data(12 字节, 单位【秒】, 见上面的改版说明):
+ *   off0-2 上报间隔(小端 24 位) off3 相同液位是否上报
+ *   off4-5 液位告警阈值 mm(小端) off6 测量模式(0 液位 1 距离)
+ *   off7-8 安装高度 cm(小端) off9-10 校准偏移 mm(int16 小端)
+ *   off11 低电量阈值 %
+ *   ⚠️ off3 网关不再采信 —— 协议已固定为"相同液位也上报", 统一按 1 下发。
  *
- * 下发给设备的 13 字节(app_cmd.h):
- *   off0-1 检测间隔(小端, 秒) off2-3 上报间隔(小端, 秒) off4 相同上报表
- *   off5-6 阈值(小端) off7 年 off8 月 off9 日 off10 周 off11 时 off12 分
+ * 下发给设备的 18 字节(app_cmd.h):
+ *   off0-11 同上 off12 年 off13 月 off14 日 off15 周 off16 时 off17 分
  *   ⚠️ 16 位字段必须【低字节在前】, 写成大端会被设备解成 512/256/62465 这种乱值。
  */
 static void _downlink_set_sensor(const lora_frame_t *frame)
 {
-    uint32_t detect_s, report_s, thresh_mm;
-    int      ret;
+    lora_sensor_params_t p;
+    int ret;
 
-    if (frame->data_len < 7U)
+    if (frame->data_len < 12U)
     {
-        _downlink_drop(frame->func, "载荷不足 7 字节");
+        _downlink_drop(frame->func, "载荷不足 12 字节");
         return;
     }
 
-    detect_s  = ((uint32_t)frame->data[0] | ((uint32_t)frame->data[1] << 8));
-    report_s  = ((uint32_t)frame->data[2] | ((uint32_t)frame->data[3] << 8));
-    thresh_mm = ((uint32_t)frame->data[5] | ((uint32_t)frame->data[6] << 8));
+    p.report_s = ((uint32_t)frame->data[0]
+                | ((uint32_t)frame->data[1] << 8)
+                | ((uint32_t)frame->data[2] << 16));
+    p.thresh_mm = ((uint16_t)frame->data[4] | ((uint16_t)frame->data[5] << 8));
+    p.measure_mode = (frame->data[6] != 0U) ? 1U : 0U;
+    p.install_height_cm = ((uint16_t)frame->data[7] | ((uint16_t)frame->data[8] << 8));
+    p.calib_offset_mm = (int16_t)((uint16_t)frame->data[9]
+                                | ((uint16_t)frame->data[10] << 8));
+    p.low_battery_pct = frame->data[11];
 
-    ret = _sensor_params_commit(frame->dev_uid, (uint16_t)detect_s, (uint16_t)report_s,
-                                (frame->data[4] != 0U), (uint16_t)thresh_mm,
-                                "云端原始帧");
+    ret = _sensor_params_commit(frame->dev_uid, &p, "云端原始帧");
     if (ret != 0)
     {
         return;     /* 具体原因 _sensor_params_commit() 已经打过了, 不重复刷日志 */

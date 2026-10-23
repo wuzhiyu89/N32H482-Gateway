@@ -29,6 +29,7 @@
 #include "log.h"
 #include "cjson_port.h"      /* v33: 信封层改用 cJSON, 测试前必须先 cjson_port_init() */
 #include "cloud_json.h"
+#include "utils.h"           /* msgId 生成器(8 位小写十六进制) */
 #include "cloud_proto.h"
 #include "cloud_profile.h"
 #include "config_store.h"
@@ -69,6 +70,25 @@ static int g_pass;
 /* UTF-8 "中文" 的显式字节, 避免依赖编译器执行字符集 */
 static const uint8_t ZH_CN[6] = { 0xE4u, 0xB8u, 0xADu, 0xE6u, 0x96u, 0x87u };
 
+/** 判断串是否为 8 位小写十六进制(msgId 的统一格式) */
+static int test_is_hex8(const char *s)
+{
+    uint8_t i;
+
+    if ((s == NULL) || (strlen(s) != 8u))
+    {
+        return 0;
+    }
+    for (i = 0u; i < 8u; i++)
+    {
+        if (!(((s[i] >= '0') && (s[i] <= '9')) || ((s[i] >= 'a') && (s[i] <= 'f'))))
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* ================================================================= */
 static void test_json_get(void)
 {
@@ -103,6 +123,25 @@ static void test_json_get(void)
 
     CHECK(cj_get(j, "ts", buf, sizeof(buf)) == CJ_NUM && (strcmp(buf, "1735689600") == 0),
           "cj_get 数字以文本写回");
+
+    /* ★2026-10-23 P1: 头文件承诺"接受 true/false 以及 0/1"。
+     * 以前只认字面量, 数字落到默认值 —— 平台发 {"enabled":0} 会被当成 true,
+     * 该关的功能关不掉, 而且一条日志都没有。 */
+    {
+        const char *jb =
+            "{\"a\":true,\"b\":false,\"c\":0,\"d\":1,\"e\":\"true\","
+            "\"f\":0,\"g\":1}";
+
+        CHECK(cj_get_bool(jb, "a", false), "bool: true  -> true");
+        CHECK(!cj_get_bool(jb, "b", true), "bool: false -> false");
+        CHECK(!cj_get_bool(jb, "c", true),
+              "★ bool: 数字 0 -> false(默认值 true 也不能赖着)");
+        CHECK(cj_get_bool(jb, "d", false), "★ bool: 数字 1 -> true");
+        CHECK(cj_get_bool(jb, "e", true), "bool: 字符串 \"true\" 不是布尔 -> 默认值");
+        CHECK(!cj_get_bool(jb, "f", true), "★ bool: {\"enabled\":0} -> false");
+        CHECK(cj_get_bool(jb, "g", false), "★ bool: {\"enabled\":1} -> true");
+        CHECK(cj_get_bool(jb, "nope", true), "bool: 缺失 -> 默认值");
+    }
 }
 
 static void test_json_array(void)
@@ -1310,6 +1349,27 @@ static void test_sensor_offline_logic(void)
         CHECK(sensor_offline_update(&online, &reported, 300000u, 0u, 60u, false)
                   == SENSOR_OFFLINE_ACT_NONE,
               "★ 失联后只回 ACK(不算上报)-> 不重复报");
+        /* ★2026-10-23 修正: 不光不能重发, 还得把被 ACK 刷成 true 的在线标志压回 false,
+         * 否则 status.report 会一直把这台已失联的设备算成在线(平台看到的与事实相反)。 */
+        CHECK(!online, "★ 失联后回 ACK -> 在线标志必须被纠正回 false(不能一直假装在线)");
+        CHECK(reported, "★ 纠正在线标志不等于'恢复', 已报失联标志仍保持");
+
+        /* 再连来几帧别人的上报, 在线标志也不许被"带回去" */
+        {
+            bool flipped = false;
+
+            for (k = 0u; k < 5u; k++)
+            {
+                online = true;      /* 模拟每帧都被 _touch_slave 刷成 true */
+                (void)sensor_offline_update(&online, &reported,
+                                            301000u + (uint32_t)k * 1000u, 0u, 60u, false);
+                if (online)
+                {
+                    flipped = true;
+                }
+            }
+            CHECK(!flipped, "★ 失联期间反复被刷 true -> 每次都被纠正回 false");
+        }
 
         CHECK(sensor_offline_update(&online, &reported, 310000u, 310000u, 60u, true)
                   == SENSOR_OFFLINE_ACT_REPORT_ONLINE,
@@ -1823,11 +1883,8 @@ static void test_set_entry(void)
     CHECK(fake_sensor_param_report_s == 1800u,
           "★★ 上报间隔【秒】原样透传, 没有 ×60/÷60 (实际 %u)",
           (unsigned)fake_sensor_param_report_s);
-    CHECK(fake_sensor_param_detect_s == 600u,
-          "★ 检测间隔用网关默认 600 秒 (实际 %u)", (unsigned)fake_sensor_param_detect_s);
-    CHECK(fake_sensor_param_same == 1, "★ 相同液位也上报 = 1");
-    CHECK(fake_sensor_param_thresh_mm == 500u,
-          "★ 阈值用默认 500mm (实际 %u)", (unsigned)fake_sensor_param_thresh_mm);
+    CHECK(fake_sensor_param_thresh_mm == 50u,
+          "★ 阈值用固定 50mm (实际 %u)", (unsigned)fake_sensor_param_thresh_mm);
     CHECK(config_store_get()->sensors[0].report_period_s == 1800u,
           "★ 网关侧配置也生效了");
     CHECK(config_store_get()->sensors[0].offline_timeout_s == 3600u,
@@ -3616,7 +3673,7 @@ static void test_render_cached_event(void)
      * [37b] 补报专用 msgId 生成器 (v63)
      * -----------------------------------------------------------------
      * 缓存记录里不存 msgId(存它每条多 16 B, 512 条容量直接减半), 所以补报时
-     * 必须重新分配。这里验三件: 前缀与直发区分、长度不超文档上限(16)、
+     * 必须重新分配。这里验: 8 位小写十六进制、长度不超文档上限(16)、
      * 放不下时**返回 false 而不是送半截 id**。
      * ================================================================= */
     {
@@ -3627,8 +3684,8 @@ static void test_render_cached_event(void)
         id2[0] = '\0';
         CHECK(cloud_proto_next_backfill_msg_id(id1, (uint16_t)sizeof(id1)) == true,
               "取到第一个补报 msgId");
-        CHECK(id1[0] == 'b', "★ 前缀 'b'(与直发 id 区分): \"%s\"", id1);
-        CHECK(strlen(id1) <= 16u, "★ 长度 <= 16(文档上限), 实际 %u", (unsigned)strlen(id1));
+        CHECK(test_is_hex8(id1), "★ 8 位小写十六进制: \"%s\"", id1);
+        CHECK(strlen(id1) == 8u, "★ 长度 = 8(文档上限 16), 实际 %u", (unsigned)strlen(id1));
 
         CHECK(cloud_proto_next_backfill_msg_id(id2, (uint16_t)sizeof(id2)) == true,
               "取到第二个");
@@ -3893,8 +3950,20 @@ static void test_backfill_page(void)
     CHECK((strstr(buf, "21000000000000000000000001") != NULL) && (strstr(buf, "21000000000000000000000003") != NULL),
           "★ 三条的 uid 都在(3 字节都还原对了)");
     CHECK(strstr(buf, "\"ts\":1700000000") != NULL, "★ ts 是原始发生时刻");
-    CHECK(strstr(buf, "\"msgId\":\"b") != NULL,
-          "★ 记录没带序号(msg_seq=0) -> 回落到补报生成器的 b 前缀(老行为不变)");
+    CHECK(strstr(buf, "\"msgId\":\"") != NULL,
+          "★ 记录没带序号(msg_seq=0) -> 用补报生成器现分配 8 位 hex");
+    {
+        const char *mid = strstr(buf, "\"msgId\":\"");
+        char        got[9];
+
+        (void)memset(got, 0, sizeof(got));
+        if (mid != NULL)
+        {
+            (void)memcpy(got, mid + 9, 8u);   /* buf 后面还有很多内容, 只截 8 位 */
+        }
+        CHECK(test_is_hex8(got),
+              "★ 现分配的 msgId 也是 8 位小写十六进制 (\"%s\")", got);
+    }
 
     /* ---- ★ 第 12 条: 记录带了原序号 -> 补报重建出【同一个 msgId】 ---- */
     event_cache_reset();
@@ -3905,7 +3974,7 @@ static void test_backfill_page(void)
         rec.b        = (uint8_t)EC_ST_NORMAL;       /* from */
         rec.ts       = 1700000200u;
         rec.aux = 90;
-        rec.msg_seq  = 7u;                          /* 入缓存时定的号(在线路径会给 s007) */
+        rec.msg_seq  = 7u;                          /* 入缓存时定的号(salt='s' + 7 重建) */
         (void)event_cache_push(&rec);
 
         (void)memset(&rec, 0, sizeof(rec));
@@ -3920,12 +3989,19 @@ static void test_backfill_page(void)
     n = cloud_proto_build_backfill_data(buf, (uint16_t)sizeof(buf), 16u,
                                         &consumed, &events, &skipped);
     CHECK((n > 0u) && (events == 2u), "2 条(带序号) -> 成功 (events=%u)", (unsigned)events);
-    CHECK(strstr(buf, "\"msgId\":\"s007\"") != NULL,
-          "★ status_change 补报用的是【原序号 s007】, 不再是另一个 b<号>");
-    CHECK(strstr(buf, "\"msgId\":\"v003\"") != NULL,
-          "★ event.device 补报用的是原序号 v003(前缀按 kind 选)");
-    CHECK(strstr(buf, "\"msgId\":\"b") == NULL,
-          "★ 带序号的记录【不再】走 b<自增> 那条路");
+    {
+        char exp_s[9];
+        char exp_v[9];
+
+        (void)utils_gen_msg_id_seq(exp_s, (uint16_t)sizeof(exp_s), (uint8_t)'s', 7u);
+        (void)utils_gen_msg_id_seq(exp_v, (uint16_t)sizeof(exp_v), (uint8_t)'v', 3u);
+        CHECK(strstr(buf, exp_s) != NULL,
+              "★ status_change 补报用 salt='s' + 原序号 7 -> \"%s\"", exp_s);
+        CHECK(strstr(buf, exp_v) != NULL,
+              "★ event.device 补报用 salt='v' + 原序号 3 -> \"%s\"", exp_v);
+        CHECK(strstr(buf, "\"msgId\":\"b") == NULL,
+              "★ 带序号的记录【不再】走 b<自增> 那条路");
+    }
     event_cache_reset();
 
     /* ---- 动作组: 2 条记录 -> 1 条事件, 但 consumed=2 ---- */

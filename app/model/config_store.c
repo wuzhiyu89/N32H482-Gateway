@@ -109,6 +109,10 @@ typedef struct
 
 #define CFG_BANK_MAGIC      0x47435452u     /* 'R''T''C''G' */
 
+static bool cfg_bank_hdr_peek(uint8_t bank, cfg_bank_hdr_t *h);
+static bool cfg_bank_gen_peek(uint8_t bank, uint32_t *gen);
+static void cfg_bank_gen_write(uint8_t bank, uint32_t gen);
+
 /* ==================== 静态内存 ==================== */
 /* 全部静态, 不占栈(配置结构体 ~1.7KB, 放栈上会压爆小栈) */
 static config_store_t s_config;                 /* 惰性加载的当前配置 */
@@ -331,7 +335,7 @@ void config_store_factory_default(config_store_t *c)
     /* ---- 3.5 gears: 出厂默认 ----
      * ★2026-10-08 按新版字段重写★
      *   每档现在是【两段 LED 文本 + 一段 TTS】, 并且有横竖屏/对齐/双色。
-     *   默认统一取: 横屏(0) + 两个半屏都居中(0) + 第一个半屏用档位主色、第二个同色。
+     *   默认统一取: 竖屏(1) + 两个半屏都居中(0) + 第一个半屏用档位主色、第二个同色。
      *   文本沿用原来的中文措辞(现场看惯了), 拆成"上/左"与"下/右"两段:
      *     竖屏时 led_text1 在左、led_text2 在右; 横屏时 1 在上、2 在下。
      *   ⚠ 三段合计必须 ≤203 字节(CFG_GEAR_TEXT_BUDGET), 下面每一档都远低于它。
@@ -342,7 +346,7 @@ void config_store_factory_default(config_store_t *c)
         cfg_gear_t *g = &c->gears[0];
         memset(g, 0, sizeof(*g));
         g->gear = 0u; g->targets_all = 1u; g->sound_mode = 0u;
-        g->led_show_mode = 0u;                      /* 横屏 */
+        g->led_show_mode = 1u;                      /* 竖屏 */
         g->led_color[0] = (uint8_t)CFG_COLOR_OFF;
         g->led_color[1] = (uint8_t)CFG_COLOR_OFF;
         (void)strcpy(g->name, "解除");
@@ -354,7 +358,7 @@ void config_store_factory_default(config_store_t *c)
         g = &c->gears[1];
         memset(g, 0, sizeof(*g));
         g->gear = 1u; g->targets_all = 1u; g->sound_mode = 1u;   /* 1 = 常亮 */
-        g->led_show_mode = 0u;
+        g->led_show_mode = 1u;                      /* 竖屏 */
         g->led_color[0] = (uint8_t)CFG_COLOR_GREEN;
         g->led_color[1] = (uint8_t)CFG_COLOR_GREEN;
         (void)strcpy(g->name, "正常");
@@ -366,7 +370,7 @@ void config_store_factory_default(config_store_t *c)
         g = &c->gears[2];
         memset(g, 0, sizeof(*g));
         g->gear = 2u; g->targets_all = 1u; g->sound_mode = 2u;   /* 2 = 慢闪 */
-        g->led_show_mode = 0u;
+        g->led_show_mode = 1u;                      /* 竖屏 */
         g->led_color[0] = (uint8_t)CFG_COLOR_YELLOW;
         g->led_color[1] = (uint8_t)CFG_COLOR_YELLOW;
         (void)strcpy(g->name, "预警");
@@ -378,7 +382,7 @@ void config_store_factory_default(config_store_t *c)
         g = &c->gears[3];
         memset(g, 0, sizeof(*g));
         g->gear = 3u; g->targets_all = 1u; g->sound_mode = 3u;   /* 3 = 快闪 */
-        g->led_show_mode = 0u;
+        g->led_show_mode = 1u;                      /* 竖屏 */
         g->led_color[0] = (uint8_t)CFG_COLOR_RED;
         g->led_color[1] = (uint8_t)CFG_COLOR_RED;
         (void)strcpy(g->name, "告警");
@@ -692,7 +696,13 @@ cfg_result_t config_store_save(const config_store_t *c)
     cfg_result_t r;
     uint16_t     n;
     uint32_t     crc = 0u;
-    config_store_t chk;
+    /* ★2026-10-23 P1: 这里原本是栈上局部变量, 而 config_store_t 实测 2640 字节,
+     *   栈总共只有 4096 字节 —— 一次落盘就吃掉 2/3 栈。calldown 链再深一点
+     *   (cloud 命令 -> cfg.set -> 落盘)就会把栈踩穿, 现象是随机的跑飞/看门狗,
+     *   现场几乎查不出来。
+     *   改成文件级 static: 只是"回读校验用的暂存", 不跨调用保留有效值。
+     *   单线程主循环调用, 不存在重入; 落盘本来就串行(谁也不会并发存配置)。 */
+    static config_store_t chk;
 
     if (c == NULL) { return CFG_ERR_PARAM; }
 
@@ -711,47 +721,170 @@ cfg_result_t config_store_save(const config_store_t *c)
     n = cfg_serialize(c, s_json_wr, (uint16_t)sizeof(s_json_wr), &crc);
     if (n == 0u) { return CFG_ERR_PARAM; }
 
-    /* --- 先写备份区 B, 回读校验 ---
-     * 这一步失败时 A 还完好, 配置不会丢。 */
-    r = cfg_bank_write(CFG_BANK_B, c, s_json_wr, n, crc);
-    if (r != CFG_OK) { return r; }
+    /* ★2026-10-23 P1-5 根治: 双区“代”号★
+     *
+     * updated_at 是云端时间(不能动语义), 而 save 是先写 B 后写 A:
+     * 若两次写之间掉电, A 是旧配置且 updated_at 可能与 B 相同 -> load 退回
+     * “A 优先” -> 静默回退旧配置。时间戳相同/没有 RTC 时尤其明显。
+     *
+     * 修法: 每个配置区最后 16 字节写一个严格递增的“代号”(magic + gen + ~gen),
+     * 不碰头部、不碰 JSON 格式; 老固件只读 header+json_len 字节, 忽略这块,
+     * 所以升级/降级都不会丢 broker/账号/密码。下面两处 gen_write 与写区同序:
+     * 先 B 后 A -> 掉电时 B 的 gen 更新, load 会选 B。 */
+    {
+        uint32_t ga = 0u;
+        uint32_t gb = 0u;
+        uint32_t gen;
 
-    r = cfg_bank_read(CFG_BANK_B, &chk);
-    if (r != CFG_OK) { return r; }
+        (void)cfg_bank_gen_peek(CFG_BANK_A, &ga);
+        (void)cfg_bank_gen_peek(CFG_BANK_B, &gb);
+        gen = ((ga > gb) ? ga : gb) + 1u;
 
-    /* --- 校验通过再写主区 A --- */
-    r = cfg_bank_write(CFG_BANK_A, c, s_json_wr, n, crc);
-    if (r != CFG_OK) { return r; }
+        r = cfg_bank_write(CFG_BANK_B, c, s_json_wr, n, crc);
+        if (r != CFG_OK) { return r; }
+        cfg_bank_gen_write(CFG_BANK_B, gen);
 
-    /* 写 A 之后不再回读 A: A 坏掉也不影响 —— 下次上电会回退到 B。
-     * 少一次整页读, 掉电窗口也更短。 */
-    return CFG_OK;
+        r = cfg_bank_read(CFG_BANK_B, &chk);
+        if (r != CFG_OK) { return r; }
+
+        r = cfg_bank_write(CFG_BANK_A, c, s_json_wr, n, crc);
+        if (r != CFG_OK) { return r; }
+        cfg_bank_gen_write(CFG_BANK_A, gen);
+
+        return CFG_OK;
+    }
+
+}
+
+/** 只读头部并做 magic/hdr_crc 校验: 用于"不解析 JSON 就判断哪一区更新" */
+static bool cfg_bank_hdr_peek(uint8_t bank, cfg_bank_hdr_t *h)
+{
+    if (cfg_port_read(bank, 0u, (uint8_t *)h, (uint16_t)sizeof(*h)) != CFG_OK)
+    {
+        return false;
+    }
+    if (h->magic != CFG_BANK_MAGIC)
+    {
+        return false;
+    }
+    return (crc32_ieee((const uint8_t *)h,
+                       (uint32_t)offsetof(cfg_bank_hdr_t, hdr_crc)) == h->hdr_crc);
+}
+
+/* ==================== 双区“代”号(旁路, 不改头部/JSON) ====================
+ * 位置: 每区最后 16 字节。老固件只读 header + json_len 字节, 不会碰这里;
+ * 新固件读到 magic/inv 不合法就把 gen 当 0(老配置) —— 双向兼容。
+ */
+#define CFG_GEN_MAGIC   0x47454E31u          /* 'GEN1' */
+#define CFG_GEN_OFFSET  ((uint32_t)CFG_BANK_SIZE - 16u)
+
+typedef struct
+{
+    uint32_t magic;
+    uint32_t gen;
+    uint32_t inv;       /* ~gen, 防半截写 */
+    uint32_t rsv;
+} cfg_bank_gen_t;
+
+static bool cfg_bank_gen_peek(uint8_t bank, uint32_t *gen)
+{
+    cfg_bank_gen_t g;
+
+    if (cfg_port_read(bank, CFG_GEN_OFFSET, (uint8_t *)&g, (uint16_t)sizeof(g)) != CFG_OK)
+    {
+        return false;
+    }
+    if ((g.magic != CFG_GEN_MAGIC) || ((g.gen ^ g.inv) != 0xFFFFFFFFu))
+    {
+        return false;
+    }
+    *gen = g.gen;
+    return true;
+}
+
+static void cfg_bank_gen_write(uint8_t bank, uint32_t gen)
+{
+    cfg_bank_gen_t g;
+
+    g.magic = CFG_GEN_MAGIC;
+    g.gen   = gen;
+    g.inv   = ~gen;
+    g.rsv   = 0u;
+    (void)cfg_port_write(bank, CFG_GEN_OFFSET, (const uint8_t *)&g, (uint16_t)sizeof(g));
 }
 
 cfg_result_t config_store_load(config_store_t *c)
 {
-    cfg_result_t r;
+    cfg_bank_hdr_t ha;
+    cfg_bank_hdr_t hb;
+    bool           va = cfg_bank_hdr_peek(CFG_BANK_A, &ha);
+    bool           vb = cfg_bank_hdr_peek(CFG_BANK_B, &hb);
+    uint8_t        order[2];
+    cfg_result_t   r = CFG_OK;
+    uint8_t        i;
 
     if (c == NULL) { return CFG_ERR_PARAM; }
 
-    r = cfg_bank_read(CFG_BANK_A, c);
-    if (r == CFG_OK)
+    /* ★2026-10-23 P1: 不能无条件"先读 A"★
+     *
+     * save 的顺序是【先写 B, 再写 A】。若在两次写之间掉电, A 还是旧配置
+     * (完整、CRC 合法), B 已经是新配置 —— 无条件优先 A 就等于"静默回退到
+     * 上一次的配置", 而平台那边 configVersion 没变, 现场极难发现。
+     *
+     * 现在先比头部的 updated_at(云端下发时间戳), 取更新的那一份;
+     * 时间戳相同再比 version(configVersion); 两者都相同(没对时 / 同一次落盘)
+     * 时维持原来的"A 优先"。
+     * 注意: 这里【没有】改 Flash 上的头部格式, 老设备上已有的配置照样能读。 */
     {
-        log_info("[CFG] 主区 A 载入成功, configVersion=%lu\r\n",
-                 (unsigned long)c->meta.config_version);
-        return CFG_OK;
-    }
-    log_info("[CFG] 主区 A 不可用(code=%d), 试备份区 B\r\n", (int)r);
+        uint32_t ga = 0u;
+        uint32_t gb = 0u;
+        bool     has_gen = cfg_bank_gen_peek(CFG_BANK_A, &ga);
+        bool     b_newer;
 
-    r = cfg_bank_read(CFG_BANK_B, c);
-    if (r == CFG_OK)
+        if (cfg_bank_gen_peek(CFG_BANK_B, &gb)) { has_gen = true; }
+
+        if (has_gen)
+        {
+            /* 有代号就按代号(老区没有代号按 0), 它严格递增 */
+            b_newer = (gb > ga);
+        }
+        else
+        {
+            /* 老配置(没有代号): 退回时间戳/版本比较 */
+            b_newer = (hb.updated_at > ha.updated_at) ||
+                      ((hb.updated_at == ha.updated_at) && (hb.version > ha.version));
+        }
+
+        if (va && vb && b_newer)
+        {
+            order[0] = CFG_BANK_B;
+            order[1] = CFG_BANK_A;
+        }
+        else
+        {
+            order[0] = CFG_BANK_A;
+            order[1] = CFG_BANK_B;
+        }
+    }
+
+    for (i = 0u; i < 2u; i++)
     {
-        log_info("[CFG] 备份区 B 载入成功(主区损坏), configVersion=%lu\r\n",
-                 (unsigned long)c->meta.config_version);
-        return CFG_OK;
-    }
-    log_info("[CFG] 两区都不可用(code=%d) -> 回退出厂默认\r\n", (int)r);
+        uint8_t bank = order[i];
 
+        r = cfg_bank_read(bank, c);
+        if (r == CFG_OK)
+        {
+            log_info("[CFG] %s区载入成功, configVersion=%lu\r\n",
+                     (bank == CFG_BANK_A) ? "主" : "备份",
+                     (unsigned long)c->meta.config_version);
+            return CFG_OK;
+        }
+        log_info("[CFG] %s区不可用(code=%d)%s\r\n",
+                 (bank == CFG_BANK_A) ? "主" : "备份", (int)r,
+                 (i == 0u) ? ", 试另一区" : "");
+    }
+
+    log_info("[CFG] 两区都不可用 -> 回退出厂默认\r\n");
     config_store_factory_default(c);
     return CFG_ERR_NOBANK;
 }
@@ -981,9 +1114,9 @@ cfg_result_t config_store_bind_device(const char *uid_hex, const char *serial,
         s->enabled          = 1u;
         s->install_height_cm = 0u;        /* D-1 死配置 */
         s->calib_offset_mm   = 0;          /* D-1 死配置 */
-        s->report_period_s  = 60u;        /* 文档默认 */
-        s->offline_timeout_s = 90u;       /* 文档默认(注意 D-7 矛盾) */
-        s->low_battery_pct  = 0u;         /* 0 = 禁用 */
+        s->report_period_s  = 300u;       /* 新设备默认上报 300s(5 分钟) */
+        s->offline_timeout_s = 900u;      /* 3 倍上报周期(值仅记录, 无消费者) */
+        s->low_battery_pct  = 80u;        /* 电量 ≤80% 上报 low_voltage */
         c->sensor_count++;
     }
     else

@@ -65,6 +65,21 @@ void data_cache_up_push(const uint8_t *uid, uint16_t level_mm, uint16_t bat_mv,
 int data_cache_down_push(uint8_t *uid, slave_type_t dev_type, uint8_t *buf, uint8_t len);
 bool data_cache_down_fetch_by_uid(uint8_t *uid, cache_down_item_t *out_item);
 void data_cache_down_del_by_uid(uint8_t *uid);
+
+/**
+ * @brief 只有"缓存里那条正是刚发出去的这一条"才删除(条件删除)
+ *
+ * 用途: 声光 0x03 是三段式(0x80 收到 -> 约 10s 后 0x82 结果)。等待期间云端可能
+ * 又下发了一条新指令覆盖同一 uid 的缓存 —— 这时【不能】按 uid 无条件删,
+ * 否则新指令被连带删掉, 设备停在旧档位且平台以为已成功。
+ *
+ * @param uid  目标从机
+ * @param func 刚发出的功能码
+ * @param data 刚发出的数据段(可为 NULL, len=0 时)
+ * @param len  数据段长度
+ * @return true = 匹配并已删除; false = 缓存里已是别的指令(或没有), 未删除
+ */
+bool data_cache_down_del_if_match(uint8_t *uid, uint8_t func, const uint8_t *data, uint8_t len);
 uint8_t data_cache_down_get_count(void);
 
 #endif /* __DATA_CACHE_H__ */
