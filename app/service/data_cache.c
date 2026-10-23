@@ -132,10 +132,13 @@ bool data_cache_down_del_if_match(uint8_t *uid, uint8_t func, const uint8_t *dat
         {
             return false;           /* 已经是另一条指令了 -> 不删 */
         }
-        if((len > 0U) && (data != NULL) &&
-           (memcmp(&it->payload[1], data, len) != 0))
+        if(len > 0U)
         {
-            return false;
+            /* data == NULL 时无法确认"是不是同一条" -> 不能删 */
+            if((data == NULL) || (memcmp(&it->payload[1], data, len) != 0))
+            {
+                return false;
+            }
         }
 
         memset(it, 0, sizeof(cache_down_item_t));

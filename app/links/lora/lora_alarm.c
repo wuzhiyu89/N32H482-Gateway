@@ -88,7 +88,15 @@ void lora_alarm_on_fail(lora_slave_t *s)
         log_info("[GEAR] !! %02X%02X%02X 连续 %u 条都没执行成功 -> 判【声光报警器离线】\r\n",
                  s->dev_uid[0], s->dev_uid[1], s->dev_uid[2],
                  (unsigned)s->alarm_attempts);
-        data_cache_down_del_by_uid(s->dev_uid);
+        /* ★2026-10-23 bugfix: 和 0x82/重传耗尽两处保持一致 —— 只有缓存里还是
+         * 刚发出去的那条才删。15 秒窗口里云端可能已经下发了【新档位】,
+         * 无条件按 uid 删会把那条新指令一起删掉(平台以为成功, 设备停在旧档位)。 */
+        if (!data_cache_down_del_if_match(s->dev_uid, s->pending_func,
+                                          s->pending_data, s->pending_data_len))
+        {
+            log_info("[GEAR] %02X%02X%02X 缓存里已是更新的指令 -> 保留待发\r\n",
+                     s->dev_uid[0], s->dev_uid[1], s->dev_uid[2]);
+        }
         /* ★2026-10-18 (丙): 记下"已报离线", 等它下次 0x82 成功时补报 recovered ★ */
         s->alarm_offline_reported = true;
         lora_alarm_fire_result(s, false, true, false);  /* ok=false, gave_up=true */

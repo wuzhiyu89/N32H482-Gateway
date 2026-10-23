@@ -72,6 +72,43 @@ bool lora_tx_downlink(uint8_t idx)
     {
         memcpy(frame.data, s->pending_data, frame.data_len);
     }
+
+    /* ★2026-10-23 bugfix: 0x01 的校时在【真正组帧的这一刻】刷新, 而且只改本地
+     *   frame.data, 不动 s->pending_data。
+     *
+     * 原因: 缓存里的载荷是"排队时刻"的校时; 如果像以前那样改写 pending_data,
+     *   那么设备回 0x80 / 重传耗尽时, del_if_match() 拿"发送时刻"去和
+     *   "排队时刻"逐字节比, 6 个时间字节必然不同 -> 缓存永远删不掉 ->
+     *   设备每次上报都会再收到一遍 0x01(重设参数+重校 RTC), 无休止。
+     *
+     * 取不到时间不丢指令: 沿用缓存里的旧校时继续发(与之前的策略一致)。 */
+    if ((frame.func == (uint8_t)LORA_FUNC_SET_SENSOR_PARAM) &&
+        (frame.data_len >= (uint8_t)LORA_SENSOR_PARAM_LEN))
+    {
+        g4_clock_t clk;
+
+        if (g4_at_get_clock(&clk))
+        {
+            frame.data[LORA_SENSOR_PARAM_TIME_OFF + 0U] = clk.year;
+            frame.data[LORA_SENSOR_PARAM_TIME_OFF + 1U] = clk.month;
+            frame.data[LORA_SENSOR_PARAM_TIME_OFF + 2U] = clk.day;
+            frame.data[LORA_SENSOR_PARAM_TIME_OFF + 3U] = clk.week;
+            frame.data[LORA_SENSOR_PARAM_TIME_OFF + 4U] = clk.hour;
+            frame.data[LORA_SENSOR_PARAM_TIME_OFF + 5U] = clk.minute;
+
+            log_info("[GW] 0x01 校时按【发送时刻】重取: 20%02u-%02u-%02u w%u %02u:%02u\r\n",
+                     (unsigned)clk.year, (unsigned)clk.month, (unsigned)clk.day,
+                     (unsigned)clk.week, (unsigned)clk.hour, (unsigned)clk.minute);
+        }
+        else
+        {
+            log_info("[GW] !! 发送前取不到 4G 时间(AT+CCLK?), 沿用缓存里的旧校时 "
+                     "20%02u-%02u-%02u 继续下发\r\n",
+                     (unsigned)frame.data[LORA_SENSOR_PARAM_TIME_OFF + 0U],
+                     (unsigned)frame.data[LORA_SENSOR_PARAM_TIME_OFF + 1U],
+                     (unsigned)frame.data[LORA_SENSOR_PARAM_TIME_OFF + 2U]);
+        }
+    }
     ok = lora_proto_send_frame(&frame);
 
     /* ==========================================================================
@@ -130,47 +167,9 @@ static int lora_try_send_downlink(uint8_t idx)
         memcpy(s->pending_data, &item.payload[1], s->pending_data_len);
     }
 
-    /* 【0x01 的校时必须在"要发的这一刻"重新向 4G 取】—— 现场协议要求:
-     *   时间是【网关 lora 发送数据时】向 4G 模块取来组帧的。
-     *
-     *   为什么不能沿用"收到云端下行时"取的那个时间戳:
-     *   液位是休眠设备, 上报间隔最长可配到 16777215 秒 —— 云端完全可能在
-     *   它上报前很久就把参数发下来了。用那时的时间戳会把设备 RTC 校偏那么久。
-     *
-     *   取不到怎么办: 【沿用缓存里的旧值】并告警, 而不是把这条指令丢掉 ——
-     *   时间戳略旧也好过"参数永远下不去"。
-     *
-     *   载荷布局(与设备端 app_cmd.h 一致, 共 18 字节, 16 位字段低字节在前):
-     *     [0-2] 上报间隔(小端 24 位) [3] 相同液位上报 [4-5] 阈值 mm
-     *     [6] 测量模式 [7-8] 安装高度 cm [9-10] 校准偏移 mm [11] 低电量阈值%
-     *     [12]年 [13]月 [14]日 [15]周 [16]时 [17]分  <- 这 6 字节是网关补的 */
-    if ((s->pending_func == LORA_FUNC_SET_SENSOR_PARAM) &&
-        (s->pending_data_len >= LORA_SENSOR_PARAM_LEN))
-    {
-        g4_clock_t clk;
-
-        if (g4_at_get_clock(&clk))
-        {
-            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 0U] = clk.year;
-            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 1U] = clk.month;
-            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 2U] = clk.day;
-            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 3U] = clk.week;  /* 1=周一 .. 7=周日 */
-            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 4U] = clk.hour;
-            s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 5U] = clk.minute;
-
-            log_info("[GW] 0x01 校时按【发送时刻】重取: 20%02u-%02u-%02u w%u %02u:%02u\r\n",
-                     (unsigned)clk.year, (unsigned)clk.month, (unsigned)clk.day,
-                     (unsigned)clk.week, (unsigned)clk.hour, (unsigned)clk.minute);
-        }
-        else
-        {
-            log_info("[GW] !! 发送前取不到 4G 时间(AT+CCLK?), 沿用缓存里的旧校时 "
-                     "20%02u-%02u-%02u 继续下发\r\n",
-                     (unsigned)s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 0U],
-                     (unsigned)s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 1U],
-                     (unsigned)s->pending_data[LORA_SENSOR_PARAM_TIME_OFF + 2U]);
-        }
-    }
+    /* 校时刷新【不在这里做】—— 见 lora_tx_downlink():
+     * 这里改 s->pending_data 会让"发送时刻"与"排队时刻"不一致, 导致
+     * data_cache_down_del_if_match() 永远匹配不上, 缓存删不掉、参数被无限重发。 */
 
     /* 打印下发帧内容(调试用) */
     log_info("[LoRA TX] dev=%02X%02X%02X func=0x%02X data_len=%u data=",
