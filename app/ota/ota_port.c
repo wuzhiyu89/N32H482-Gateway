@@ -382,6 +382,45 @@ bool ota_port_clear_ctx(void)
  * mark_valid: 擦除标记页 -> 写 32 字节标记
  * mark_invalid: 擦除标记页(0xFF 即无效, 不需要先擦再写)
  */
+/* ==================== ★2026-10-23 P0: 擦标记页必须保住 A/B 启动记录 ====================
+ *
+ * 【问题】标记页(8KB)里同时住着三样东西:
+ *     [0, 480)      OTA 固件标记 / MQTT ctx / HTTP 续传记录
+ *     [512, 8192)   A/B 启动记录(32B 一条, 追加写)
+ * 而擦除粒度就是整整一页 —— 只要擦一次标记页, 启动记录就【一起没了】。
+ *
+ * 【后果: 变砖】丢记录之后 bootloader 走"无记录"的老路径, 直接跳 A 槽。
+ *   OTA 启动时目标槽恰恰就是「当前槽取反」, 也就是说:
+ *     · 正在跑 B 时发起 OTA -> 擦 A 槽 -> 此时若下载失败/中止/掉电
+ *       -> 重启后没有启动记录 -> 跳 A -> A 是空白 -> 死循环 NOP
+ *   A/B 两个槽都起不来, 串口无输出, 只能 SWD 重刷。
+ *
+ * 【修法】本页每一次擦除都改成: 擦前记下启动记录 -> 擦页 -> 立刻写回。
+ *   擦完这一页全 0xFF, 槽 0 必然是擦除态, 写回一次就成功, 代价 ~几十微秒。
+ *   调用方(mark_valid / mark_invalid / resume_save)全部改走本函数。
+ *
+ * 【残留窗口】"擦完、还没写回"之间有几十微秒, 若恰好在这期间掉电, 记录仍会丢。
+ *   这一点由 bootloader 侧兜底: 没有记录时按 A -> B 逐个试, 只要任一槽的
+ *   向量表合法就能起来(见 bootloader.c 的 bl_jump_app / bl_run)。
+ */
+static bool meta_page_erase_keep_boot(void)
+{
+    ota_boot_rec_t keep;
+    bool           has = ota_port_boot_load(&keep);
+
+    if (!storage_flash_erase_page(OTA_META_ADDR))
+    {
+        return false;       /* 擦都没擦成, 记录还在, 不用管 */
+    }
+
+    if (has)
+    {
+        /* 写回失败也只能接受: 上面说的 bootloader 兜底会兜住 */
+        (void)ota_port_boot_save(&keep);
+    }
+    return true;
+}
+
 bool ota_port_mark_valid(const ota_meta_t *meta)
 {
     if (meta == NULL)
@@ -389,8 +428,8 @@ bool ota_port_mark_valid(const ota_meta_t *meta)
         return false;
     }
 
-    /* 先擦除标记页 */
-    if (!storage_flash_erase_page(OTA_META_ADDR))
+    /* 先擦除标记页(★保留 A/B 启动记录, 见 meta_page_erase_keep_boot) */
+    if (!meta_page_erase_keep_boot())
     {
         return false;
     }
@@ -419,9 +458,11 @@ bool ota_port_mark_valid(const ota_meta_t *meta)
 void ota_port_mark_invalid(void)
 {
     /* 擦除标记页 = 整页 0xFF, bootloader 读不到 magic 就认为无效。
-     * ⚠️ 注意它会连【续传记录】一起擦掉(同一页) —— 这是刻意的语义,
-     *    见 ota_port.h 的说明; 调用方要读记录必须先读再调本函数。 */
-    (void)storage_flash_erase_page(OTA_META_ADDR);
+     * ⚠️ 它会连【续传记录】一起擦掉(同一页) —— 这是刻意的语义,
+     *    见 ota_port.h 的说明; 调用方要读记录必须先读再调本函数。
+     * ★ 但【A/B 启动记录不能丢】—— 丢了会在"OTA 失败 + 目标槽已擦"时变砖,
+     *   所以统一走 meta_page_erase_keep_boot() 擦完写回。 */
+    (void)meta_page_erase_keep_boot();
 }
 
 /* ==================== OTA over HTTP 的掉电续传记录 ====================
@@ -469,8 +510,10 @@ bool ota_port_http_resume_save(uint32_t written, uint32_t size,
         (void)strncpy(rec.version, version, sizeof(rec.version) - 1u);
     }
 
-    /* 先擦整页(下载阶段没有有效标记, 安全) */
-    if (!storage_flash_erase_page(OTA_META_ADDR))
+    /* 先擦整页(下载阶段没有有效标记, 安全)
+     * ★ 同样要保住 A/B 启动记录 —— 本函数在 ota.start 里紧跟 mark_invalid 被调用,
+     *   如果这里再裸擦一次, 上一步刚写回的记录立刻又没了。 */
+    if (!meta_page_erase_keep_boot())
     {
         return false;
     }

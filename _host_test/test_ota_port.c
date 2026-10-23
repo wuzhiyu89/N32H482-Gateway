@@ -361,6 +361,57 @@ static void test_guards(void)
     CHECK((OTA_HTTP_RESUME_OFFSET % 8u) == 0u, "★ 偏移 8 字节对齐");
 }
 
+/* ==================== [8] ★P0: 擦标记页必须保住 A/B 启动记录 ====================
+ *
+ * 标记页 8KB 一擦全没, 而 [512,8192) 住着 A/B 启动记录。2026-10-23 之前
+ * mark_invalid()/mark_valid()/resume_save() 都是裸擦整页, 于是:
+ *   跑在 B -> 发起 OTA(目标槽 A 被擦) -> 擦标记页(启动记录没了)
+ *   -> 下载失败/中止/掉电 -> 重启后 bootloader 无记录 -> 跳 A -> A 是空的 -> 变砖。
+ * 这条用例把"擦完必须把记录写回去"钉死。 */
+static void test_meta_erase_keeps_boot(void)
+{
+    ota_boot_rec_t w;
+    ota_boot_rec_t r;
+    ota_meta_t     meta;
+
+    printf("\n[8] ★P0: mark_* / resume_save 擦标记页时不许弄丢 A/B 启动记录\n");
+
+    memset(&w, 0, sizeof(w));
+    w.seq       = 7u;
+    w.active    = OTA_BOOT_SLOT_B;
+    w.pending   = OTA_BOOT_SLOT_NONE;
+    w.confirmed = 1u;
+    w.tries     = 0u;
+
+    /* --- mark_invalid: OTA 启动/失败/中止都会调 --- */
+    fake_storage_reset();
+    CHECK(ota_port_boot_save(&w), "先写一条启动记录(active=B)");
+    memset(&r, 0, sizeof(r));
+    CHECK(ota_port_boot_load(&r) && (r.active == OTA_BOOT_SLOT_B), "记录在位");
+
+    ota_port_mark_invalid();
+    memset(&r, 0, sizeof(r));
+    CHECK(ota_port_boot_load(&r), "★★ mark_invalid() 之后启动记录必须还在");
+    CHECK(r.active == OTA_BOOT_SLOT_B, "★ active 仍是 B");
+    CHECK(r.seq == 7u, "★ seq 原样保留(实际 %lu)", (unsigned long)r.seq);
+
+    /* --- resume_save: 在 ota.start 里紧跟 mark_invalid, 最容易再擦一次 --- */
+    CHECK(ota_port_http_resume_save(8192u, 65536u, MD5A, "1.0.14"), "写续传记录");
+    memset(&r, 0, sizeof(r));
+    CHECK(ota_port_boot_load(&r) && (r.active == OTA_BOOT_SLOT_B),
+          "★★ resume_save() 之后启动记录仍在");
+
+    /* --- mark_valid: 校验通过、升级成功时 --- */
+    memset(&meta, 0, sizeof(meta));
+    meta.total_size = 65536u;
+    meta.crc32      = 0x11223344u;
+    CHECK(ota_port_mark_valid(&meta), "写有效标记(OTAV)");
+    memset(&r, 0, sizeof(r));
+    CHECK(ota_port_boot_load(&r) && (r.active == OTA_BOOT_SLOT_B),
+          "★★ mark_valid() 之后启动记录仍在");
+    CHECK(rd8(FM_META_ADDR) == (uint8_t)'O', "★ 同时 OTAV 标记也写对了");
+}
+
 int main(void)
 {
     printf("==== app/ota/ota_port.c 主机测试(手工 Flash 替身) ====\n");
@@ -374,6 +425,7 @@ int main(void)
     test_clear_keeps_mark();
     test_bad_record();
     test_guards();
+    test_meta_erase_keeps_boot();
 
     printf("\n==== 通过 %d, 失败 %d ====\n", g_pass, g_fail);
     return (g_fail == 0) ? 0 : 1;
