@@ -104,14 +104,13 @@ typedef struct
     uint32_t crc32;         /* = meta.crc32, 覆盖 system..ota 那段 JSON */
     uint32_t updated_at;
     uint32_t json_len;
-    uint32_t hdr_crc;       /* 前 20 字节的 CRC32 */
+    uint32_t seq;           /* ★每次落盘 +1: 双区载入据此判断谁新(不依赖时钟) */
+    uint32_t hdr_crc;       /* 前 24 字节的 CRC32 */
 } cfg_bank_hdr_t;
 
 #define CFG_BANK_MAGIC      0x47435452u     /* 'R''T''C''G' */
 
 static bool cfg_bank_hdr_peek(uint8_t bank, cfg_bank_hdr_t *h);
-static bool cfg_bank_gen_peek(uint8_t bank, uint32_t *gen);
-static void cfg_bank_gen_write(uint8_t bank, uint32_t gen);
 
 /* ==================== 静态内存 ==================== */
 /* 全部静态, 不占栈(配置结构体 ~1.7KB, 放栈上会压爆小栈) */
@@ -667,7 +666,8 @@ static cfg_result_t cfg_bank_read(uint8_t bank, config_store_t *c)
 }
 
 static cfg_result_t cfg_bank_write(uint8_t bank, const config_store_t *c,
-                                   const char *json, uint16_t len, uint32_t crc)
+                                   const char *json, uint16_t len, uint32_t crc,
+                                   uint32_t seq)
 {
     cfg_bank_hdr_t h;
     cfg_result_t   r;
@@ -678,6 +678,7 @@ static cfg_result_t cfg_bank_write(uint8_t bank, const config_store_t *c,
     h.crc32      = crc;
     h.updated_at = c->meta.updated_at;
     h.json_len   = len;
+    h.seq        = seq;
     h.hdr_crc    = crc32_ieee((const uint8_t *)&h, (uint32_t)offsetof(cfg_bank_hdr_t, hdr_crc));
 
     if (((uint32_t)len + (uint32_t)sizeof(h)) > CFG_BANK_SIZE) { return CFG_ERR_PARAM; }
@@ -721,35 +722,34 @@ cfg_result_t config_store_save(const config_store_t *c)
     n = cfg_serialize(c, s_json_wr, (uint16_t)sizeof(s_json_wr), &crc);
     if (n == 0u) { return CFG_ERR_PARAM; }
 
-    /* ★2026-10-23 P1-5 根治: 双区“代”号★
+    /* ★2026-10-23 P1-5 根治: 头部单调 seq★
      *
-     * updated_at 是云端时间(不能动语义), 而 save 是先写 B 后写 A:
-     * 若两次写之间掉电, A 是旧配置且 updated_at 可能与 B 相同 -> load 退回
-     * “A 优先” -> 静默回退旧配置。时间戳相同/没有 RTC 时尤其明显。
+     * save 的顺序是【先写 B 后写 A】。若在两次写之间掉电, A 还是旧配置;
+     * 靠 updated_at 判断不可靠(同一秒两次下发 / 没有 RTC 时都相同), 于是
+     * 会给"静默回退旧配置"留窗口。
      *
-     * 修法: 每个配置区最后 16 字节写一个严格递增的“代号”(magic + gen + ~gen),
-     * 不碰头部、不碰 JSON 格式; 老固件只读 header+json_len 字节, 忽略这块,
-     * 所以升级/降级都不会丢 broker/账号/密码。下面两处 gen_write 与写区同序:
-     * 先 B 后 A -> 掉电时 B 的 gen 更新, load 会选 B。 */
+     * 现在头部带 seq, 每次落盘取 max(A.seq, B.seq)+1, 两个区写同一个值。
+     * load 直接比 seq: 谁大谁新; 掉电只写了 B 时, B.seq 更大 -> 选 B。
+     * updated_at 保持云端时间语义, 仅作 seq 相同时的次级比较。 */
     {
-        uint32_t ga = 0u;
-        uint32_t gb = 0u;
-        uint32_t gen;
+        cfg_bank_hdr_t ha;
+        cfg_bank_hdr_t hb;
+        uint32_t       sa = 0u;
+        uint32_t       sb = 0u;
+        uint32_t       seq;
 
-        (void)cfg_bank_gen_peek(CFG_BANK_A, &ga);
-        (void)cfg_bank_gen_peek(CFG_BANK_B, &gb);
-        gen = ((ga > gb) ? ga : gb) + 1u;
+        if (cfg_bank_hdr_peek(CFG_BANK_A, &ha)) { sa = ha.seq; }
+        if (cfg_bank_hdr_peek(CFG_BANK_B, &hb)) { sb = hb.seq; }
+        seq = ((sa > sb) ? sa : sb) + 1u;
 
-        r = cfg_bank_write(CFG_BANK_B, c, s_json_wr, n, crc);
+        r = cfg_bank_write(CFG_BANK_B, c, s_json_wr, n, crc, seq);
         if (r != CFG_OK) { return r; }
-        cfg_bank_gen_write(CFG_BANK_B, gen);
 
         r = cfg_bank_read(CFG_BANK_B, &chk);
         if (r != CFG_OK) { return r; }
 
-        r = cfg_bank_write(CFG_BANK_A, c, s_json_wr, n, crc);
+        r = cfg_bank_write(CFG_BANK_A, c, s_json_wr, n, crc, seq);
         if (r != CFG_OK) { return r; }
-        cfg_bank_gen_write(CFG_BANK_A, gen);
 
         return CFG_OK;
     }
@@ -771,48 +771,6 @@ static bool cfg_bank_hdr_peek(uint8_t bank, cfg_bank_hdr_t *h)
                        (uint32_t)offsetof(cfg_bank_hdr_t, hdr_crc)) == h->hdr_crc);
 }
 
-/* ==================== 双区“代”号(旁路, 不改头部/JSON) ====================
- * 位置: 每区最后 16 字节。老固件只读 header + json_len 字节, 不会碰这里;
- * 新固件读到 magic/inv 不合法就把 gen 当 0(老配置) —— 双向兼容。
- */
-#define CFG_GEN_MAGIC   0x47454E31u          /* 'GEN1' */
-#define CFG_GEN_OFFSET  ((uint32_t)CFG_BANK_SIZE - 16u)
-
-typedef struct
-{
-    uint32_t magic;
-    uint32_t gen;
-    uint32_t inv;       /* ~gen, 防半截写 */
-    uint32_t rsv;
-} cfg_bank_gen_t;
-
-static bool cfg_bank_gen_peek(uint8_t bank, uint32_t *gen)
-{
-    cfg_bank_gen_t g;
-
-    if (cfg_port_read(bank, CFG_GEN_OFFSET, (uint8_t *)&g, (uint16_t)sizeof(g)) != CFG_OK)
-    {
-        return false;
-    }
-    if ((g.magic != CFG_GEN_MAGIC) || ((g.gen ^ g.inv) != 0xFFFFFFFFu))
-    {
-        return false;
-    }
-    *gen = g.gen;
-    return true;
-}
-
-static void cfg_bank_gen_write(uint8_t bank, uint32_t gen)
-{
-    cfg_bank_gen_t g;
-
-    g.magic = CFG_GEN_MAGIC;
-    g.gen   = gen;
-    g.inv   = ~gen;
-    g.rsv   = 0u;
-    (void)cfg_port_write(bank, CFG_GEN_OFFSET, (const uint8_t *)&g, (uint16_t)sizeof(g));
-}
-
 cfg_result_t config_store_load(config_store_t *c)
 {
     cfg_bank_hdr_t ha;
@@ -831,29 +789,14 @@ cfg_result_t config_store_load(config_store_t *c)
      * (完整、CRC 合法), B 已经是新配置 —— 无条件优先 A 就等于"静默回退到
      * 上一次的配置", 而平台那边 configVersion 没变, 现场极难发现。
      *
-     * 现在先比头部的 updated_at(云端下发时间戳), 取更新的那一份;
-     * 时间戳相同再比 version(configVersion); 两者都相同(没对时 / 同一次落盘)
-     * 时维持原来的"A 优先"。
-     * 注意: 这里【没有】改 Flash 上的头部格式, 老设备上已有的配置照样能读。 */
+     * 现在先比头部的 seq(每次落盘 +1), 谁大谁新; 再比 updated_at /
+     * version 作为同 seq 的次级判据; 全相同才退回"A 优先"。
+     * seq 由 save 保证严格递增, 不依赖 RTC/云端时间戳。 */
     {
-        uint32_t ga = 0u;
-        uint32_t gb = 0u;
-        bool     has_gen = cfg_bank_gen_peek(CFG_BANK_A, &ga);
-        bool     b_newer;
-
-        if (cfg_bank_gen_peek(CFG_BANK_B, &gb)) { has_gen = true; }
-
-        if (has_gen)
-        {
-            /* 有代号就按代号(老区没有代号按 0), 它严格递增 */
-            b_newer = (gb > ga);
-        }
-        else
-        {
-            /* 老配置(没有代号): 退回时间戳/版本比较 */
-            b_newer = (hb.updated_at > ha.updated_at) ||
-                      ((hb.updated_at == ha.updated_at) && (hb.version > ha.version));
-        }
+        bool b_newer = (hb.seq > ha.seq) ||
+                       ((hb.seq == ha.seq) && (hb.updated_at > ha.updated_at)) ||
+                       ((hb.seq == ha.seq) && (hb.updated_at == ha.updated_at) &&
+                        (hb.version > ha.version));
 
         if (va && vb && b_newer)
         {
