@@ -1,4 +1,4 @@
-﻿/* ============================================================================
+/* ============================================================================
  * fake_lora_business.c —— 主机测试用的 lora_business 替身(实现)
  *   只实现 cloud_proto.c 真正引用的那两个符号:
  *     · lora_business_unbind()          —— dev.unbind / sen.unbind 的异步入口
@@ -38,9 +38,7 @@ uint16_t fake_gear_res_code;
 /* ---- ★2026-10-05: sen.set -> LoRa 0x01 参数下发 ---- */
 int      fake_sensor_param_calls;
 char     fake_sensor_param_uid[27];
-uint16_t fake_sensor_param_detect_s;
-uint16_t fake_sensor_param_report_s;
-int      fake_sensor_param_same;
+uint32_t fake_sensor_param_report_s;
 uint16_t fake_sensor_param_thresh_mm;
 int      fake_sensor_param_ret  = 1;
 
@@ -70,27 +68,21 @@ void fake_lora_business_reset(void)
 
     fake_sensor_param_calls        = 0;
     fake_sensor_param_uid[0]       = '\0';
-    fake_sensor_param_detect_s     = 0u;
     fake_sensor_param_report_s     = 0u;
-    fake_sensor_param_same         = -1;
     fake_sensor_param_thresh_mm    = 0u;
     fake_sensor_param_ret          = 1;
 }
 
 /* ---- 被 cloud_proto.c 调用(sen.set): 把平台参数打包成 0x01 帧下发 ---- */
 bool lora_business_set_sensor_params(const char *uid_hex,
-                                     uint16_t detect_period_s,
-                                     uint16_t report_period_s,
-                                     bool     report_same_level,
+                                     uint32_t report_period_s,
                                      uint16_t alarm_thresh_mm)
 {
     fake_sensor_param_calls++;
     (void)strncpy(fake_sensor_param_uid, (uid_hex != NULL) ? uid_hex : "",
                   sizeof(fake_sensor_param_uid) - 1u);
     fake_sensor_param_uid[sizeof(fake_sensor_param_uid) - 1u] = '\0';
-    fake_sensor_param_detect_s  = detect_period_s;
     fake_sensor_param_report_s  = report_period_s;
-    fake_sensor_param_same      = report_same_level ? 1 : 0;
     fake_sensor_param_thresh_mm = alarm_thresh_mm;
     return (fake_sensor_param_ret != 0);
 }

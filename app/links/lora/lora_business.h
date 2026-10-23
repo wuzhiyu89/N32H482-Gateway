@@ -114,6 +114,11 @@ typedef struct
     uint32_t           last_report_tick;  /* 上次 0x02 上报的 tick ms */
     bool               offline_reported;  /* 已上报过"失联"、且还没等到新的 0x02 上报 */
 
+    /* ★2026-10-22: 低电量事件去重(平台 lowBatteryPercent 生效后新增)★
+     *   true  = 已经报过 low_voltage, 电量没回到阈值以上就不再重复报;
+     *   回差 5%: bat_pct >= 阈值+5 才清位, 避免在阈值附近抖动时每包都报。 */
+    bool               low_bat_reported;
+
     /* ---- ★2026-10-08 声光(0x03)"三段式应答"状态★ ----
      * 设备对 0x03 回两条: 0x80(收到了) → 0x82(成功) / 0x83(失败)。
      * 0x80 不再是终态, 所以 0x03 必须【单独】跟一个 15 秒窗口 + 自己的重试计数 ——
@@ -258,12 +263,18 @@ bool lora_business_send_ack(const uint8_t gw_uid[LORA_UID_BYTES], const uint8_t 
 int lora_business_send_req(const uint8_t uid[LORA_UID_BYTES], slave_type_t dev_type,
                            uint8_t func, const uint8_t *data, uint8_t data_len);
 
+/* ==================== 液位 0x01 的默认参数(单一来源) ====================
+ * 平台只下发上报周期, 其余项由网关填固定值。绑定成功后的"首次配置
+ * 同步"与 sen.set/cfg.set 必须用同一组值, 所以只在这里定义, 不要各写一份。
+ * ★2026-10-22: 协议取消"检测间隔"字段; "相同液位上报"固定为 1。
+ * ⚠ 单位: 秒 / mm; 设备端按秒解析, 网关不换算。 */
+#define LORA_SENSOR_REPORT_DEFAULT_S    300u    /* 上报间隔默认 300 秒(与绑定默认一致) */
+#define LORA_SENSOR_ALARM_DEFAULT_MM    50u     /* 液位告警阈值 50 mm = 5 cm(云端不下发) */
+
 /**
  * \brief 平台 JSON(sen.set) 改液位参数 —— 网关负责组 0x01 帧并投递
- * \param uid_hex          6 字符 hex 串(该传感器必须已在从机表里)
- * \param detect_period_s  检测间隔, 单位【秒】
+ * \param uid_hex          13 字节 UID 的 26 位 hex 串(该传感器必须已在从机表里)
  * \param report_period_s  上报间隔, 单位【秒】(= 平台 sen.set 的 reportPeriodSeconds)
- * \param report_same_level true = 相同液位也上报
  * \param alarm_thresh_mm  液位告警阈值 mm
  * \return true  = 已投入下发缓存(等传感器下次上报时搭车下发)
  *         false = uid 非法 / 间隔越界 / 投递失败(原因已打日志)
@@ -273,17 +284,24 @@ int lora_business_send_req(const uint8_t uid[LORA_UID_BYTES], slave_type_t dev_t
  *   平台给什么就原样填进帧里; 设备端按秒解析(设备侧由用户对接)。
  *   ⚠ 这条与 2026-09 的"分钟"版本【不兼容】: 旧版网关原样转发分钟值、设备端自己
  *     ×60 换成秒。现在两端都按秒, 谁都不换算 —— 网关/设备必须同一次改版。
- *   16 位字段上限 65535 秒 ≈ 18.2 小时。
  *
- * \note 与"云端直接下发 0x01 原始帧"走的是【同一段实现】(lora_business.c 的
- *       _sensor_params_commit): 范围检查 / 补 6 字节校时 / 日志完全一致,
+ * ★2026-10-22 载荷改版★ 0x01 共 18 字节:
+ *   [0-2] 上报间隔(小端 24 位) [3] 相同液位上报(恒 1)
+ *   [4-5] 告警阈值 mm(小端)    [6] 测量模式(0 液位 1 距离)
+ *   [7-8] 安装高度 cm(小端)    [9-10] 校准偏移 mm(int16 小端)
+ *   [11] 低电量阈值 %(0=禁用)  [12-17] 年 月 日 周 时 分
+ *   取消了原 [0-1] 的检测间隔; 星期由日期算出, 不再固定周五。
+ *   ⚠️ 测量模式/安装高度/校准偏移/低电量阈值由【液位设备自己应用】:
+ *      本函数从已落盘的 config_store 里取这几个值一起下发,
+ *      平台通过 cfg.set.sensors[] 改了它们即可, 调用方无需逐个透传。
+ *
+ * \note 与"云端直接下发 0x01 原始帧"走的是【同一段实现】(_sensor_params_commit):
+ *       范围检查 / 补 6 字节校时 / 日志完全一致,
  *       不会出现"两条下行的规则不一样"这种最难查的问题。
  *       两条路都是【异步】的: 只入队, 真正发送在传感器下次上报的应答窗口里。
  */
 bool lora_business_set_sensor_params(const char *uid_hex,
-                                     uint16_t detect_period_s,
-                                     uint16_t report_period_s,
-                                     bool     report_same_level,
+                                     uint32_t report_period_s,
                                      uint16_t alarm_thresh_mm);
 
 /**
@@ -326,6 +344,24 @@ typedef void (*lora_sensor_event_fn)(const char *uid_hex, bool online);
  * \brief 注册失联/恢复事件回调; 传 NULL 取消
  */
 void lora_business_set_sensor_event_cb(lora_sensor_event_fn fn);
+
+/* ==========================================================================
+ * ★2026-10-22 新增: 液位低电量事件回调(对应平台 lowBatteryPercent)
+ * ==========================================================================
+ * \param uid_hex 26 位 hex 串
+ * \param bat_pct 触发时的电量百分比
+ *
+ * 【触发规则】
+ *   · 阈值来自 config_store 的 sensors[].low_battery_pct; 0 = 禁用;
+ *   · 每次 0x02 上报比较 bat_pct <= 阈值时触发【一次】, 之后不再重复报;
+ *   · 电量回升到 阈值+5% 以上才复位, 防止阈值附近抖动时每包都报。
+ * 【为什么在 LoRa 层判】电量只在 0x02 里出现, 每台设备的去重状态
+ *   (low_bat_reported) 本来就存在从机表里, 不需要主程序再维护一份。
+ * \note 回调里【不要阻塞】; 不注册时只打日志。
+ */
+typedef void (*lora_sensor_low_bat_fn)(const char *uid_hex, uint8_t bat_pct);
+
+void lora_business_set_sensor_low_bat_cb(lora_sensor_low_bat_fn fn);
 
 /* ==========================================================================
  * ★★2026-10-18 新增: 每次液位上报(0x02)的原始数据回调★★
@@ -627,8 +663,11 @@ uint8_t lora_business_radio_busy(void);
  *     └头┘  ver  └─ 网关 ─┘  └─ 设备 ─┘  fc  dlen  └── data 7B ──┘       └CRC┘
  * 网关解 hex 后按 lora_proto_parse_raw() 严格校验(帧头/版本/长度/CRC),
  * 再按功能码:
- *   0x01(设置液位参数): 云端 data 只有 7 字节【没有校时】,
- *        网关补上 年 月 日 周 时 分(时间取自 AT+CCLK?, 星期固定周五)后转发。
+ *   0x01(设置液位参数): 云端 data 只有 12 字节【没有校时】,
+ *        [0-2] 上报间隔(小端 24 位) [3] 相同液位(网关固定按 1 发) [4-5] 阈值 mm;
+ *        [6] 测量模式 [7-8] 安装高度 cm [9-10] 校准偏移 mm [11] 低电量阈值%;
+ *        网关补上 年 月 日 周 时 分(时间取自 AT+CCLK?, 星期按日期算真实值)后
+ *        以 18 字节下发。
  *        ★2026-10-05 改版: 间隔字段单位 = 【秒】★ —— 云端发秒, 网关【原样转发
  *        不换算】, 设备端按秒直接用(设备侧由用户对接)。
  *        旧版是"分钟"(网关原样转发分钟, 设备端自己 ×60 换内部秒)——

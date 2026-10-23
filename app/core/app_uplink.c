@@ -39,6 +39,7 @@
 #include "ota_port.h"
 #include "param_save.h"
 #include "sensor_offline.h"
+#include "utils.h"
 #include "telemetry_cache.h"
 
 #if MAIN_STATUS_JSON_ENABLE
@@ -142,7 +143,8 @@ sys_err_t app_publish_status_json(void)
     }
 
     seq++;
-    (void)snprintf(msg_id, sizeof(msg_id), "h%03u", (unsigned)(seq % 1000u));
+    (void)utils_gen_msg_id_seq(msg_id, (uint16_t)sizeof(msg_id), (uint8_t)'h',
+                              (uint16_t)(seq % 1000u));
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
                                     "status.report", msg_id, app_now_unix(), data);
@@ -279,7 +281,8 @@ static sys_err_t uplink_publish_telemetry(int32_t avg_mm)
     }
 
     s_tel_seq++;
-    (void)snprintf(msg_id, sizeof(msg_id), "m%03u", (unsigned)(s_tel_seq % 1000u));
+    (void)utils_gen_msg_id_seq(msg_id, (uint16_t)sizeof(msg_id), (uint8_t)'m',
+                              (uint16_t)(s_tel_seq % 1000u));
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
                                     "telemetry.report", msg_id, app_now_unix(), data);
@@ -519,7 +522,7 @@ void app_telemetry_backfill_poll(void)
         return;
     }
 
-    (void)snprintf(msg_id, sizeof(msg_id), "m%03u", (unsigned)rec->msg_seq);
+    (void)utils_gen_msg_id_seq(msg_id, (uint16_t)sizeof(msg_id), (uint8_t)'m', rec->msg_seq);
 
     /* ★信封 ts 也用 record 的 ts —— 不是补报时刻 */
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
@@ -593,7 +596,6 @@ void app_ota_progress_poll(void)
     static uint8_t  s_last_state   = 0xFFu;
     static uint8_t  s_last_percent = 0xFFu;
     static uint32_t s_t_last;
-    static uint16_t s_ota_seq;
     static uint8_t  s_reboot_cnt;
     static uint8_t  s_ready_announced;      /* 非自动复位时, READY 那几行只打一次 */
 
@@ -720,8 +722,7 @@ void app_ota_progress_poll(void)
                        ota_http_state_name(st.state), (unsigned)st.percent);
     }
 
-    s_ota_seq = (uint16_t)((s_ota_seq + 1u) % 1000u);
-    (void)snprintf(msg_id, sizeof(msg_id), "p%03u", (unsigned)s_ota_seq);
+    (void)utils_gen_msg_id(msg_id, (uint16_t)sizeof(msg_id));
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
                                     "ota.progress", msg_id, app_now_unix(), data);
@@ -800,12 +801,23 @@ bool app_time_sync(uint32_t unix_ts)
  *   与 data_cache 的 peek/drop 是同一条纪律 —— 一次失败不能把事件永久丢掉。
  * ★ 缓存里"渲染不出来"的条也必须出队 ★：否则它们永远堵在队头,
  *   后面的事件全被堵死(v67 的契约)。跳过多少条会打日志 —— 可以丢, 不许静默丢。
+ * ★ 2026-10-22: 补报也要套 {event,msgId,ts,data} 信封 ★
+ *   此前把 data 段 {"events":[...]} 直接发出去, 平台收到的报文缺 event/msgId/ts,
+ *   与文档 7.5 及其它五类上行不一致。现在 data 先组在 buf 的预留区, 再 memmove
+ *   到信封头之后 —— 不新增 RAM, 也不用第二个 4 KB 缓冲。
  */
+
+/* 信封头 {"event":"event.buffered","msgId":"01234567","ts":1700000300,"data":
+ * 实测 78 B(ts 10 位), 这里留到 96 B 冗余; 尾部再留 "}" + '\0' 两个字节。 */
+#define BACKFILL_HDR_MAX   96u
+#define BACKFILL_TAIL_MAX  2u
+
 void app_backfill_poll(void)
 {
     /* ★ 必须 static: 栈只有 4 KB, 一页正文约 3 KB 放栈上会直接把栈吃掉 ★ */
     static char buf[4096];
     static char topic[64];
+    char       *data = buf + BACKFILL_HDR_MAX;   /* data 段先组在预留区, 之后再前移 */
     uint8_t     consumed;
     uint8_t     events;
     uint8_t     skipped;
@@ -818,7 +830,9 @@ void app_backfill_poll(void)
         return;                     /* 断线期间不补报(补了也发不出去) */
     }
 
-    n = cloud_proto_build_backfill_data(buf, (uint16_t)sizeof(buf), 16u,
+    n = cloud_proto_build_backfill_data(data,
+                                        (uint16_t)(sizeof(buf) - BACKFILL_HDR_MAX - BACKFILL_TAIL_MAX),
+                                        (uint8_t)16u,
                                         &consumed, &events, &skipped);
     if (consumed == 0u)
     {
@@ -837,6 +851,32 @@ void app_backfill_poll(void)
             event_cache_drop();
         }
         return;
+    }
+
+    /* ★ 套信封: {event,msgId,ts,data} ★
+     *   外层 msgId 每次补报现生成(只标识"这一批"); 内层每条事件的 msgId/ts
+     *   由 cloud_proto_build_backfill_data 保留原值, 平台按内层做幂等。 */
+    {
+        char hdr[BACKFILL_HDR_MAX];
+        char msg_id[20];
+        int  hlen;
+
+        (void)utils_gen_msg_id(msg_id, (uint16_t)sizeof(msg_id));
+        hlen = snprintf(hdr, sizeof(hdr),
+                        "{\"event\":\"event.buffered\",\"msgId\":\"%s\",\"ts\":%lu,\"data\":",
+                        msg_id, (unsigned long)app_now_unix());
+        if ((hlen <= 0) || ((uint32_t)hlen >= (uint32_t)sizeof(hdr)))
+        {
+            log_info("[CLOUD] !! 补报信封组装失败, 这 %u 条留着下次\r\n",
+                     (unsigned)consumed);
+            return;                 /* 没发布 -> 一条都不 drop */
+        }
+
+        (void)memmove(buf, data, (size_t)n + 1u);   /* 含结尾 '\0' */
+        (void)memcpy(buf, hdr, (size_t)hlen);
+        buf[hlen + (int)n]     = '}';
+        buf[hlen + (int)n + 1] = '\0';
+        n = (uint16_t)(hlen + (int)n + 1);
     }
 
     tlen = cloud_profile_build_topic(CLOUD_TOPIC_EVENT, topic, (uint16_t)sizeof(topic));

@@ -31,8 +31,17 @@ bool cloud_write_section_list(cJSON *obj, const char *key, uint8_t mask);
 /* 命令处理函数（按域拆文件；命令表仍在 cloud_proto.c） */
 int cloud_cmd_sen_bind(const cloud_req_t *req, cJSON *data);
 int cloud_cmd_sen_unbind(const cloud_req_t *req, cJSON *data);
-int cloud_cmd_sen_set(const cloud_req_t *req, cJSON *data);
-int cloud_cmd_sen_query(const cloud_req_t *req, cJSON *data);
+int  cloud_cmd_sen_set(const cloud_req_t *req, cJSON *data);
+int  cloud_cmd_sen_query(const cloud_req_t *req, cJSON *data);
+
+/**
+ * @brief 把传感器上报周期打包成 LoRa 0x01, 投入下发缓存
+ * @param uid            13 字节 UID 的 26 位 hex 串
+ * @param report_period_s 上报周期(秒)
+ * @return true = 已投入下发缓存; false = 投递失败(调用方决定是否记日志)
+ * @note  sen.set 与 cfg.set(sensors[]) 共用, 保证两条路径对设备侧的口径一致。
+ */
+bool cloud_push_sensor_params(const char *uid, uint16_t report_period_s);
 int cloud_cmd_dev_bind(const cloud_req_t *req, cJSON *data);
 int cloud_cmd_dev_unbind(const cloud_req_t *req, cJSON *data);
 int cloud_cmd_dev_set(const cloud_req_t *req, cJSON *data);

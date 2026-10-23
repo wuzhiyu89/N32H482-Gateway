@@ -15,6 +15,7 @@
 #include "cloud_json.h"
 #include "cloud_profile.h"
 #include "config_store.h"
+#include "lora_business.h"      /* LORA_SENSOR_REPORT_DEFAULT_S */
 #include "log.h"
 
 /**
@@ -173,6 +174,81 @@ int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data)
             /* 落盘成功才提交给"当前配置"实例 —— 紧接着的 cfg.query 才能读到新值 */
             live = config_store_get_mut();
             (void)memcpy(live, &cloud_cfg_staging_buf, sizeof(*live));
+        }
+    }
+
+    /* ---- ★ 传感器参数: 与 sen.set 同一口径 ----
+     * 云端已改用 cfg.set 控制传感器。sensors[] 里只要显式带了【任一设备侧参数】
+     * (上报周期/测量模式/安装高度/校准偏移/低电量阈值), 落盘成功后就要用 0x01
+     * 下发给传感器本身; 否则设备仍按旧参数工作。
+     * 顺序与 sen.set 一致: 先确认落盘成功, 再动设备(落盘失败时 applied 已清空)。 */
+    if ((res.applied & CFG_CH_SENSORS) != 0u)
+    {
+        static const char *const dev_keys[] =
+        {
+            "reportPeriodSeconds", "measureMode", "installHeightCm",
+            "calibOffsetMm",       "lowBatteryPercent"
+        };
+        uint16_t cnt = cj_count(sections, "sensors");
+        uint16_t i;
+
+        for (i = 0u; i < cnt; i++)
+        {
+            char     path[40];
+            char     uid[CFG_UID_STR_MAX];
+            uint16_t period = 0u;
+            bool     device_dirty = false;
+            uint8_t  k;
+
+            (void)snprintf(path, sizeof(path), "sensors[%u].uid", (unsigned)i);
+            if (!cj_get_str(sections, path, uid, (uint16_t)sizeof(uid)) ||
+                !cfg_uid_valid(uid))
+            {
+                continue;               /* 该域已整体校验过, 这里只做尽力而为 */
+            }
+
+            for (k = 0u; k < (uint8_t)(sizeof(dev_keys) / sizeof(dev_keys[0])); k++)
+            {
+                (void)snprintf(path, sizeof(path), "sensors[%u].%s",
+                               (unsigned)i, dev_keys[k]);
+                if (cj_get(sections, path, NULL, 0u) != CJ_NOTFOUND)
+                {
+                    device_dirty = true;
+                    break;
+                }
+            }
+            if (!device_dirty)
+            {
+                continue;               /* 没动任何设备侧参数: 不需要动设备 */
+            }
+
+            /* 上报周期取【落盘后】的配置值: JSON 没给时就是原值,
+             * 0x01 需要的仍是一个完整的 18 字节参数包。 */
+            {
+                const config_store_t *live_cfg = config_store_get();
+                const cfg_sensor_t   *s = NULL;
+                uint8_t               n;
+
+                for (n = 0u; (live_cfg != NULL) && (n < live_cfg->sensor_count) &&
+                              (n < (uint8_t)CFG_SENSOR_MAX); n++)
+                {
+                    if (strcmp(live_cfg->sensors[n].uid, uid) == 0)
+                    {
+                        s = &live_cfg->sensors[n];
+                        break;
+                    }
+                }
+                if (s != NULL)
+                {
+                    period = s->report_period_s;
+                }
+            }
+
+            if (period == 0u)
+            {
+                period = LORA_SENSOR_REPORT_DEFAULT_S;
+            }
+            (void)cloud_push_sensor_params(uid, period);
         }
     }
 

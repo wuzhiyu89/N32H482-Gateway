@@ -64,6 +64,9 @@ bool app_time_sync(uint32_t unix_ts);
 void app_on_level_report(const uint8_t uid[LORA_UID_BYTES],
                          uint16_t level_mm, uint8_t bat_pct, int8_t rssi_dbm);
 void app_on_sensor_event(const char *uid_hex, bool online);
+
+/* ★2026-10-22: 液位低电量 -> event.device / low_voltage */
+void app_on_sensor_low_battery(const char *uid_hex, uint8_t bat_pct);
 void app_on_field_result(bool ok, const char *field10);
 void app_publish_bind_event(const char *uid_hex, bool is_sensor,
                             lora_bind_event_t event);

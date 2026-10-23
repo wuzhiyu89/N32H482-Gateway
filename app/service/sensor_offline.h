@@ -92,8 +92,14 @@ bool sensor_offline_should_report(uint32_t now_ms, uint32_t last_report_ms,
  *   · got_report = false:
  *       只有"在线 且 还没报过失联"才可能跳变成失联; 一旦报过就 NONE ——
  *       这就是"同一个传感器失联后不要每收一条别人的上报就重复发一次"的落点。
+ *       ★2026-10-23: 已报过失联时, 本函数仍会把 *is_online 压回 false(不发事件)。
+ *         否则失联期间设备回一个 ACK 就把 is_online 刷成 true, 之后再也改不回来,
+ *         status.report 会一直把它算成在线(详见 .c 里那段注释)。
  *
- * @param is_online        输入/输出: 在线标志(调用方持有, 例如 lora_slave_t.is_online)
+ * @param is_online        输入/输出: 在线标志(调用方持有, 例如 lora_slave_t.is_online)。
+ *                         ⚠ 它是"是否收到过有效 0x02 上报"的语义, 不是"最近有没有收到帧";
+ *                         调用方可能在两帧之间把它刷成 true(如收到 ACK), 本函数负责在
+ *                         "已报失联"状态下把它纠正回 false。
  * @param offline_reported 输入/输出: 是否"已上报过失联、还没等到新上报"
  * @param now_ms           当前 tick
  * @param last_report_ms   该传感器上次 0x02 上报的 tick(本函数不改它, 由调用方在收到上报时更新)

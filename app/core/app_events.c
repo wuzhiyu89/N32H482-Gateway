@@ -24,6 +24,7 @@
 #include "g4_at.h"
 #include "lora_business.h"
 #include "sensor_offline.h"
+#include "utils.h"
 
 /**
  * @brief 组一条 event.device(文档 7.4) 发到 event topic —— 液位失联/恢复
@@ -59,7 +60,24 @@
  * ★2026-10-18: 定义上移到这里(uplink_publish_device_event 也要用它)。 */
 static uint16_t s_evt_seq;
 
-static void uplink_publish_device_event(const char *uid_hex, bool online,
+/* 设备事件码 -> 线上字符串(与 cloud_proto.h 的 cloud_device_event_t.event 一致) */
+static const char *s_dev_ev_name(uint8_t ev)
+{
+    switch (ev)
+    {
+        case (uint8_t)EC_DEV_EV_BOUND:       return "bound";
+        case (uint8_t)EC_DEV_EV_BIND_FAILED: return "bind_failed";
+        case (uint8_t)EC_DEV_EV_UNBOUND:     return "unbound";
+        case (uint8_t)EC_DEV_EV_ONLINE:      return "online";
+        case (uint8_t)EC_DEV_EV_OFFLINE:     return "offline";
+        case (uint8_t)EC_DEV_EV_LOW_VOLTAGE: return "low_voltage";
+        default:                             return "unknown";
+    }
+}
+
+/* ★2026-10-22: online(bool) 改成事件码(ev), 以支持 low_voltage。
+ *   事件码与缓存里 rec.a 用的是同一套 EC_DEV_EV_*, 在线/补报两条路不会分叉。 */
+static void uplink_publish_device_event(const char *uid_hex, uint8_t ev,
                                       const char *dev_type)
 {
     /* 一律 static: 栈只有 4KB(见 startup_n32h47x_48x.s 的 Stack_Size) */
@@ -91,7 +109,7 @@ static void uplink_publish_device_event(const char *uid_hex, bool online,
         (void)memset(&rec, 0, sizeof(rec));
         rec.kind = (uint8_t)EC_KIND_DEVICE;
         (void)memcpy(rec.uid, uid_b, CFG_UID_BYTES);
-        rec.a    = online ? (uint8_t)EC_DEV_EV_ONLINE : (uint8_t)EC_DEV_EV_OFFLINE;
+        rec.a    = ev;
         rec.b    = is_sensor ? (uint8_t)EC_DEV_SENSOR : (uint8_t)EC_DEV_DEVICE;
         rec.ts   = app_now_unix();
         rec.seq  = 0U;                          /* 设备事件不按 seq 分组 */
@@ -101,8 +119,7 @@ static void uplink_publish_device_event(const char *uid_hex, bool online,
         if (event_cache_push(&rec))
         {
             log_info("[CLOUD] 4G 不在线 -> 设备事件(uid=%s type=%s %s)入补报缓存\r\n",
-                     (uid_hex != NULL) ? uid_hex : "?", dt,
-                     online ? "online" : "offline");
+                     (uid_hex != NULL) ? uid_hex : "?", dt, s_dev_ev_name(ev));
         }
         else
         {
@@ -115,7 +132,7 @@ static void uplink_publish_device_event(const char *uid_hex, bool online,
     cjw_obj_begin(&w);
     cjw_kv_str(&w, "uid", (uid_hex != NULL) ? uid_hex : "");
     cjw_kv_str(&w, "devType", dt);
-    cjw_kv_str(&w, "event", online ? "online" : "offline");
+    cjw_kv_str(&w, "event", s_dev_ev_name(ev));
     cjw_obj_end(&w);
     if (!cjw_ok(&w))
     {
@@ -125,7 +142,8 @@ static void uplink_publish_device_event(const char *uid_hex, bool online,
     (void)cjw_len(&w);      /* v91: 本函数不再需要长度(信封自带) —— 原来算给 dlen 但没用到 */
 
     seq++;
-    (void)snprintf(msg_id, sizeof(msg_id), "v%03u", (unsigned)(seq % 1000u));
+    (void)utils_gen_msg_id_seq(msg_id, (uint16_t)sizeof(msg_id), (uint8_t)'v',
+                              (uint16_t)(seq % 1000u));
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
                                     "event.device", msg_id, app_now_unix(), data);
@@ -163,7 +181,24 @@ static void uplink_publish_device_event(const char *uid_hex, bool online,
  */
 void app_on_sensor_event(const char *uid_hex, bool online)
 {
-    uplink_publish_device_event(uid_hex, online, "sensor");
+    uplink_publish_device_event(uid_hex,
+                                online ? (uint8_t)EC_DEV_EV_ONLINE
+                                       : (uint8_t)EC_DEV_EV_OFFLINE,
+                                "sensor");
+}
+
+/**
+ * @brief 液位低电量(适配器, 固定 devType="sensor")
+ *
+ * ★2026-10-22 新增: 平台 lowBatteryPercent 由网关判定, 越限上报
+ *   event.device{"event":"low_voltage"}。判定与去重(low_bat_reported)在
+ *   lora_business.c, 本函数只负责组包 —— 与失联事件同一条路径, 断线会入补报缓存。
+ */
+void app_on_sensor_low_battery(const char *uid_hex, uint8_t bat_pct)
+{
+    log_info("[CLOUD] 液位 %s 低电量(%u%%), 上报 event.device low_voltage\r\n",
+             (uid_hex != NULL) ? uid_hex : "?", (unsigned)bat_pct);
+    uplink_publish_device_event(uid_hex, (uint8_t)EC_DEV_EV_LOW_VOLTAGE, "sensor");
 }
 
 /**
@@ -214,7 +249,6 @@ void app_publish_bind_event(const char *uid_hex, bool is_sensor,
     static char     data[96];
     static char     payload[CLOUD_RESP_MAX];
     static char     topic[64];
-    static uint16_t seq;
     char            msg_id[20];
     cjw_t           w;
     uint16_t        plen;
@@ -240,8 +274,7 @@ void app_publish_bind_event(const char *uid_hex, bool is_sensor,
         return;
     }
 
-    seq++;
-    (void)snprintf(msg_id, sizeof(msg_id), "b%03u", (unsigned)(seq % 1000u));
+    (void)utils_gen_msg_id(msg_id, (uint16_t)sizeof(msg_id));
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
                                     "event.device", msg_id, app_now_unix(), data);
@@ -375,18 +408,19 @@ void app_on_alarm_result(const char *uid_hex, uint8_t gear,
          * ★2026-10-18 (丙): devType="device"(声光), 且它自己内部也会入缓存。 */
         if (gave_up)
         {
-            uplink_publish_device_event(uid_hex, false, "device");
+            uplink_publish_device_event(uid_hex, (uint8_t)EC_DEV_EV_OFFLINE, "device");
         }
         /* ★2026-10-18 (丙): 之前判过离线, 这次成功 => 补报"恢复" ★ */
         if (recovered)
         {
-            uplink_publish_device_event(uid_hex, true, "device");
+            uplink_publish_device_event(uid_hex, (uint8_t)EC_DEV_EV_ONLINE, "device");
         }
         return;
     }
 
     seq++;
-    (void)snprintf(msg_id, sizeof(msg_id), "a%03u", (unsigned)(seq % 1000u));
+    (void)utils_gen_msg_id_seq(msg_id, (uint16_t)sizeof(msg_id), (uint8_t)'a',
+                              (uint16_t)(seq % 1000u));
 
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
                                     "event.action", msg_id, app_now_unix(), data);
@@ -420,12 +454,12 @@ void app_on_alarm_result(const char *uid_hex, uint8_t gear,
     if (gave_up)
     {
         log_info("[CLOUD] !! %s 连续 3 条 0x03 都没成功 -> 补报设备离线\r\n", uid_hex);
-        uplink_publish_device_event(uid_hex, false, "device");
+        uplink_publish_device_event(uid_hex, (uint8_t)EC_DEV_EV_OFFLINE, "device");
     }
     if (recovered)
     {
         log_info("[CLOUD] %s 之前判过离线, 这次 0x82 成功 -> 补报设备恢复\r\n", uid_hex);
-        uplink_publish_device_event(uid_hex, true, "device");
+        uplink_publish_device_event(uid_hex, (uint8_t)EC_DEV_EV_ONLINE, "device");
     }
 }
 /* ==================================================================
@@ -507,7 +541,10 @@ void app_publish_status_change(uint8_t from_code, uint8_t to_code,
 
     /* ★ 第 12 条: 与"断线入缓存"那条路共用 s_evt_seq, 同一个事件只有一个号 */
     s_evt_seq = (uint16_t)((s_evt_seq + 1u) % 1000u);
-    (void)snprintf(msg_id, sizeof(msg_id), "s%03u", (unsigned)s_evt_seq);    plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
+    (void)utils_gen_msg_id_seq(msg_id, (uint16_t)sizeof(msg_id), (uint8_t)'s',
+                              s_evt_seq);
+
+    plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
                                     "event.status_change", msg_id, app_now_unix(), data);
     if (plen == 0u)
     {

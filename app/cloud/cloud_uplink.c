@@ -19,6 +19,7 @@
 #include "event_cache.h"
 #include "level_eval.h"
 #include "log.h"
+#include "utils.h"
 
 /* ---- 断线补报的一页组装 (v67) ---- */
 #define CLOUD_BACKFILL_MAX      16u     /* 一批最多 16 条(见头文件: 栈只有 4 KB) */
@@ -38,7 +39,7 @@ static cloud_action_result_t s_bf_res[CLOUD_BACKFILL_MAX];
  * 【为什么要有它】原来补报一律调 cloud_proto_next_backfill_msg_id() 生成 `b<序号>`,
  * 于是同一个事件在线时是 `s007`、补报时变成 `b012` —— 平台按 msgId 做幂等去重
  * 时对不上。现在入缓存时就把序号存进记录（event_cache.h 的 `msg_seq`, 2 B/条），
- * 这里按 kind 选前缀、原样重建，与首次分配时逐字节相同。
+ * 这里按 kind 选 salt、用同一个生成器重建，与首次分配时逐字节相同。
  *
  * @return true = 用记录里的原序号重建成功;
  *         false = 记录没带序号(msg_seq==0, 老记录)或 kind 不认
@@ -46,8 +47,7 @@ static cloud_action_result_t s_bf_res[CLOUD_BACKFILL_MAX];
  */
 static bool cloud_proto_msg_id_of_record(char *out, uint16_t cap, const ec_record_t *rec)
 {
-    char prefix;
-    int  n;
+    uint8_t salt;
 
     if ((out == NULL) || (cap == 0u) || (rec == NULL) || (rec->msg_seq == 0u))
     {
@@ -56,14 +56,13 @@ static bool cloud_proto_msg_id_of_record(char *out, uint16_t cap, const ec_recor
 
     switch (rec->kind)
     {
-    case (uint8_t)EC_KIND_STATUS_CHANGE: prefix = 's'; break;   /* 与 main.c 在线路径一致 */
-    case (uint8_t)EC_KIND_DEVICE:        prefix = 'v'; break;
-    case (uint8_t)EC_KIND_ACTION:        prefix = 'a'; break;   /* 约定; 生产者见 v12 说明 */
+    case (uint8_t)EC_KIND_STATUS_CHANGE: salt = (uint8_t)'s'; break;   /* 与在线路径一致 */
+    case (uint8_t)EC_KIND_DEVICE:        salt = (uint8_t)'v'; break;
+    case (uint8_t)EC_KIND_ACTION:        salt = (uint8_t)'a'; break;
     default:                             return false;
     }
 
-    n = snprintf(out, (size_t)cap, "%c%03u", prefix, (unsigned)rec->msg_seq);
-    return ((n > 0) && (n < (int)cap));
+    return utils_gen_msg_id_seq(out, cap, salt, rec->msg_seq);
 }
 
 uint16_t cloud_proto_build_backfill_data(char *out, uint16_t cap, uint8_t batch_max,
@@ -421,26 +420,7 @@ uint16_t cloud_proto_render_cached_event(char *out, uint16_t cap,
 
 bool cloud_proto_next_backfill_msg_id(char *out, uint16_t cap)
 {
-    static uint32_t s_seq;              /* 进程内单调自增; 重启从头开始(见头文件说明) */
-    int             n;
-
-    if ((out == NULL) || (cap == 0u))
-    {
-        return false;
-    }
-
-    s_seq++;
-    n = snprintf(out, (size_t)cap, "b%lu", (unsigned long)s_seq);
-
-    /* snprintf 被截断时返回"想要写多长" —— 用它判断是否放得下。
-     * 宁可返回 false 让调用方换更大的缓冲, 也绝不写出一个半截的 msgId
-     * (半截 id 会让平台的幂等配对逻辑对不上, 而且现场极难看懂)。 */
-    if ((n <= 0) || (n >= (int)cap) || (n > (int)(CLOUD_MSGID_MAX - 1u)))
-    {
-        out[0] = '\0';
-        return false;
-    }
-    return true;
+    return utils_gen_msg_id(out, cap);
 }
 
 /* ==================================================================

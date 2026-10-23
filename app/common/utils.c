@@ -1,5 +1,65 @@
 #include "utils.h"
 #include <stdbool.h>
+#include <stdio.h>
+
+/* ---- msgId 生成 ----
+ * 输出固定 8 位小写十六进制。算法是"上电种子 + 类型 + 序号"的无状态混洗:
+ *   1) 每次调用序号不同 -> ID 不同;
+ *   2) 同一 (salt, seq) 在本次上电内结果恒定 -> 断线补报可原样重建, 平台幂等不误判;
+ *   3) 上电时由 app_boot 用"网关 UID + 时基"播种 -> 不同设备、不同轮次不撞号。
+ * 不调用 utils_msg_id_seed() 时退化为固定种子(主机测试可复现)。
+ */
+static uint32_t s_msg_id_seed = 0x9E3779B9u;
+static uint16_t s_msg_id_seq  = 0u;
+
+static uint32_t msg_id_mix(uint32_t x)
+{
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 15;
+    x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return x;
+}
+
+void utils_msg_id_seed(uint32_t seed)
+{
+    s_msg_id_seed = (seed != 0u) ? seed : 0x9E3779B9u;
+}
+
+bool utils_gen_msg_id_seq(char *out, uint16_t cap, uint8_t salt, uint16_t seq)
+{
+    uint32_t v;
+    int      n;
+
+    if (out == NULL)
+    {
+        return false;
+    }
+    if (cap == 0u)
+    {
+        return false;
+    }
+    if (cap < 9u)
+    {
+        out[0] = '\0';
+        return false;
+    }
+
+    v = msg_id_mix(s_msg_id_seed ^ ((uint32_t)salt << 24) ^ (uint32_t)seq);
+    n = snprintf(out, (size_t)cap, "%08lx", (unsigned long)v);
+    return (n == 8);
+}
+
+bool utils_gen_msg_id(char *out, uint16_t cap)
+{
+    s_msg_id_seq++;
+    if (s_msg_id_seq == 0u)
+    {
+        s_msg_id_seq = 1u;
+    }
+    return utils_gen_msg_id_seq(out, cap, 0u, s_msg_id_seq);
+}
 
 uint16_t crc16_modbus(const uint8_t *data, uint16_t len)
 {

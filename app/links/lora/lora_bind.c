@@ -145,6 +145,58 @@ void lora_bind_handle_0x04(const lora_frame_t *frame)
     lora_bind_send_ack_to_pending();
 }
 
+/* ---------- 绑定成功后的"首次配置同步" ----------
+ *
+ * 【为什么要有它 —— 用户 2026-10-22 报的 bug】
+ *   绑定成功只写了 config_store + 从机表, 没有把 0x01 参数投进下发缓存。
+ *   于是液位第一次上报时, 网关的应答里没有配置, 设备只能一直用自己的出厂参数,
+ *   直到云端再下发一次 sen.set / cfg.set。现场表现就是"绑完第一包不上配置"。
+ *
+ * 【为什么投缓存而不是立刻发】
+ *   液位是休眠设备, 平时不在接收窗口; 只能等它上报时搭车下发
+ *   (lora_reply_logic 第二步)。投进去之后, 它第一次上报就能收到。
+ *
+ * 【值从哪来】
+ *   上报周期取 config_store 里该设备的值 —— 新绑定是默认 300s; 重绑时保留平台
+ *   此前设过的值, 换的新设备也能立刻对齐。其余三项用 lora_business.h 的共用默认。
+ */
+static void lora_bind_queue_sensor_sync(const char *uid_hex)
+{
+    const config_store_t *cfg;
+    uint16_t report_s = LORA_SENSOR_REPORT_DEFAULT_S;
+    uint8_t  i;
+
+    cfg = config_store_get();
+    if (cfg != NULL)
+    {
+        for (i = 0u; (i < cfg->sensor_count) && (i < (uint8_t)CFG_SENSOR_MAX); i++)
+        {
+            if (strcmp(cfg->sensors[i].uid, uid_hex) == 0)
+            {
+                if (cfg->sensors[i].report_period_s != 0u)
+                {
+                    report_s = cfg->sensors[i].report_period_s;
+                }
+                break;
+            }
+        }
+    }
+
+    if (lora_business_set_sensor_params(uid_hex,
+                                        report_s,
+                                        LORA_SENSOR_ALARM_DEFAULT_MM))
+    {
+        log_info("[BIND] 已为 %s 排入 0x01 配置同步(上报=%us 相同上报=1 "
+                 "阈值=%umm), 它下次上报时随应答下发\r\n",
+                 uid_hex, (unsigned)report_s, (unsigned)LORA_SENSOR_ALARM_DEFAULT_MM);
+    }
+    else
+    {
+        log_info("[BIND] !! %s 的 0x01 配置同步排入失败(原因见上一行 [CLOUD->LoRa])\r\n",
+                 uid_hex);
+    }
+}
+
 /* 收到设备回的 0x80 确认: 写 config_store + 追加运行期从机表 + 触发 BOUND */
 void lora_bind_handle_dev_ack(const lora_frame_t *frame)
 {
@@ -222,6 +274,12 @@ void lora_bind_handle_dev_ack(const lora_frame_t *frame)
             /* ③ 清该 UID 的历史快照(新设备不继承旧值; 其它 UID 不受影响) */
             (void)last_value_clear_uid(g_bind.pending_uid);
 
+            /* ④ 新设备必须拿到当前参数: 排一条 0x01, 首次上报时随应答下发 */
+            if (g_bind.is_sensor)
+            {
+                lora_bind_queue_sensor_sync(uid_hex);
+            }
+
             lora_bind_fire_event(uid_hex, g_bind.is_sensor, LORA_BIND_EVENT_BOUND);
             g_bind.state = BIND_IDLE;
             return;
@@ -256,6 +314,12 @@ void lora_bind_handle_dev_ack(const lora_frame_t *frame)
     }
 
     /* 4) 绑定成功 */
+    /* 给液位排一条 0x01 配置同步 —— 修"绑完第一包不带配置" */
+    if (g_bind.is_sensor)
+    {
+        lora_bind_queue_sensor_sync(uid_hex);
+    }
+
     log_info("[BIND] %s %s 绑定成功(uid=%s, serial=%s, name=%s), 已写 config_store + 从机表\r\n",
              g_bind.is_sensor ? "液位传感器" : "声光设备",
              uid_hex, uid_hex,

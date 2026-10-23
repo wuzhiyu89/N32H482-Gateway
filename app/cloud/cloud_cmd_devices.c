@@ -136,14 +136,36 @@ static int cloud_measure_mode_of(const char *s)
  *       文档 3.3 / 3.6 的全部取值范围(安装高度/校准偏移/周期/低电/超时/音量/闪光)。
  *       校验不过就当参数错返回, 副本丢掉, 配置里一个字都不动。 */
 /* ==================== ★2026-10-05: sen.set -> LoRa 0x01 的默认值 ★ ====================
- * 用户口径: 平台只下发一个字段(上报周期), 另外几个用默认值。
- *   检测间隔 = 10 分钟 = 600 秒      (用户明确指定)
- *   相同液位也上报 = 1               (与 LORA_LEVEL_DEFAULT_DATA 一致)
- *   液位告警阈值 = 500mm             (同上; 现场设备侧一直在用这个量级)
- * ⚠ 这三个是【网关侧填给设备】的值, 不是平台的配置字段 —— 想改就改这里。
- *   ⚠ 单位是【秒】(2026-10-05 起协议字段就是秒, 网关不换算)。 */
-#define CLOUD_SENSOR_DETECT_DEFAULT_S   600u
-#define CLOUD_SENSOR_ALARM_DEFAULT_MM   500u
+ * 用户口径: 平台只下发一个字段(上报周期), 另外几个用固定值。
+ *   相同液位也上报 = 1               (2026-10-22 起协议固定, 不再是可配项)
+ *   液位告警阈值 = 50mm = 5cm       (云端不下发, 设备侧固定用这个值)
+ *   ★2026-10-22: 检测间隔字段已从 0x01 协议取消, 不再下发。
+ * ⚠ 这两个是【网关侧填给设备】的值, 不是平台的配置字段。
+ *   ⚠ 单位是【秒】(2026-10-05 起协议字段就是秒, 网关不换算)。
+ *   ★2026-10-22: 固定值上移到 lora_business.h(LORA_SENSOR_*)★
+ *     绑定成功后的"首次配置同步"也走同一组值 —— 两处各写一份迟早会漂。 */
+
+/*!
+ * \brief 把上报周期打成 0x01 帧投入 LoRa 下发缓存
+ * \note  sen.set 与 cfg.set(sensors[]) 共用 —— 云端已改用 cfg.set 控制传感器,
+ *        两条路径必须同口径, 否则走 cfg.set 时传感器本身收不到新周期。
+ */
+bool cloud_push_sensor_params(const char *uid, uint16_t report_period_s)
+{
+    if (!lora_business_set_sensor_params(uid,
+                                         report_period_s,
+                                         (uint16_t)LORA_SENSOR_ALARM_DEFAULT_MM))
+    {
+        log_info("[CLOUD] !! %s 的参数已落盘, 但 0x01 投递给 LoRa 失败"
+                 "(见上一行 [CLOUD->LoRa] 的原因) —— 设备侧参数没变\r\n", uid);
+        return false;
+    }
+
+    log_info("[CLOUD] %s 已落盘, 且 0x01 参数已投入下发缓存"
+             "(上报=%us + 测量模式/安装高度/校准偏移/低电量阈值), 等它下次上报时搭车下发\r\n",
+             uid, (unsigned)report_period_s);
+    return true;
+}
 
 static int cloud_cmd_set_entry(const cloud_req_t *req, cJSON *data, bool is_sensor)
 {
@@ -151,10 +173,11 @@ static int cloud_cmd_set_entry(const cloud_req_t *req, cJSON *data, bool is_sens
     uint8_t i;
     int     idx  = -1;
 
-    /* ★2026-10-05: 是否给了"上报周期"、是否给了"离线超时" —— 决定要不要下发 0x01、
-     *   以及要不要自动补 offlineTimeoutSeconds。 */
-    bool     report_given  = false;
+    /* ★2026-10-05: 是否给了"设备侧参数" —— 决定要不要下发 0x01;
+     *   offlineTimeoutSeconds 只在网关侧生效, 单独记一个标志。 */
+    bool     device_dirty  = false;
     bool     offline_given = false;
+    bool     report_given  = false;      /* 只用于 offlineTimeoutSeconds 的 2 倍自动对齐 */
 
     (void)data;                             /* 文档这两条响应没有 data */
 
@@ -217,6 +240,7 @@ static int cloud_cmd_set_entry(const cloud_req_t *req, cJSON *data, bool is_sens
             m = cloud_measure_mode_of(mm);
             if (m < 0) { return CLOUD_EC_PARAM; }
             s->measure_mode = (uint8_t)m;
+            device_dirty = true;        /* ★ 测量模式要下发给设备 ★ */
         }
 
         /* 【数值】先取 uint32, 再夹回目标宽度 —— 越界交给 validate(), 不在这里判 */
@@ -225,25 +249,29 @@ static int cloud_cmd_set_entry(const cloud_req_t *req, cJSON *data, bool is_sens
             uint32_t v = cj_get_uint(req->data, "installHeightCm", 0u);
             if (v > 0xFFFFu) { return CLOUD_EC_PARAM; }
             s->install_height_cm = (uint16_t)v;
+            device_dirty = true;        /* ★ 安装高度要下发给设备 ★ */
         }
         if (cloud_field_given(req->data, "calibOffsetMm"))
         {
             int32_t v = cj_get_int(req->data, "calibOffsetMm", 0);
             if ((v < -32768) || (v > 32767)) { return CLOUD_EC_PARAM; }
             s->calib_offset_mm = (int16_t)v;
+            device_dirty = true;        /* ★ 校准偏移要下发给设备 ★ */
         }
         if (cloud_field_given(req->data, "reportPeriodSeconds"))
         {
             uint32_t v = cj_get_uint(req->data, "reportPeriodSeconds", 0u);
             if (v > 0xFFFFu) { return CLOUD_EC_PARAM; }
             s->report_period_s = (uint16_t)v;
-            report_given = true;        /* ★ 决定改完要不要下发 0x01 给传感器 ★ */
+            device_dirty = true;        /* ★ 决定改完要不要下发 0x01 给传感器 ★ */
+            report_given = true;        /* 自动对齐 offlineTimeoutSeconds 用 */
         }
         if (cloud_field_given(req->data, "lowBatteryPercent"))
         {
             uint32_t v = cj_get_uint(req->data, "lowBatteryPercent", 0u);
             if (v > 0xFFu) { return CLOUD_EC_PARAM; }
             s->low_battery_pct = (uint8_t)v;
+            device_dirty = true;        /* ★ 低电量阈值要下发给设备 ★ */
         }
         if (cloud_field_given(req->data, "offlineTimeoutSeconds"))
         {
@@ -320,31 +348,15 @@ static int cloud_cmd_set_entry(const cloud_req_t *req, cJSON *data, bool is_sens
     /* ---- ★2026-10-05: 网关负责把参数打包成 LoRa 0x01 帧下发给传感器本身★
      *   顺序很关键: 必须【落盘成功之后】才动设备 —— 否则会出现
      *   "设备参数改了、网关配置没改"的分裂状态, 而且平台收到 1007 以为没生效。
-     *   只在上报周期被给到时下发: 改 name/enabled 这类【网关侧才有意义】的字段
-     *   不下发(传感器只有 3 字节 UID, 它连自己的 name 都不知道)。
+     *   ★2026-10-22: 只要给了任一设备侧参数(上报周期/测量模式/安装高度/校准偏移/
+     *   低电量阈值)就下发 0x01 —— 0x01 从 config_store 取完整参数, 不在这里逐个透传。
+     *   改 name/enabled 这类【网关侧才有意义】的字段不下发。
      *   单位【秒】, 网关不换算。真正上空中继在传感器下次上报的应答窗口里(异步)。 */
-    if (is_sensor && report_given)
+    if (is_sensor && device_dirty)
     {
         const cfg_sensor_t *s = &config_store_get()->sensors[idx];
 
-        if (!lora_business_set_sensor_params(s->uid,
-                                             (uint16_t)CLOUD_SENSOR_DETECT_DEFAULT_S,
-                                             s->report_period_s,
-                                             true,
-                                             (uint16_t)CLOUD_SENSOR_ALARM_DEFAULT_MM))
-        {
-            log_info("[CLOUD] !! sen.set: %s 的参数已落盘, 但 0x01 投递给 LoRa 失败"
-                     "(见上一行 [CLOUD->LoRa] 的原因) —— 设备侧参数没变\r\n", s->uid);
-        }
-        else
-        {
-            log_info("[CLOUD] sen.set: %s 已落盘, 且 0x01 参数已投入下发缓存"
-                     "(检测=%us 上报=%us 相同上报=1 阈值=%umm), 等它下次上报时搭车下发\r\n",
-                     s->uid,
-                     (unsigned)CLOUD_SENSOR_DETECT_DEFAULT_S,
-                     (unsigned)s->report_period_s,
-                     (unsigned)CLOUD_SENSOR_ALARM_DEFAULT_MM);
-        }
+        (void)cloud_push_sensor_params(s->uid, s->report_period_s);
     }
 
     return CLOUD_EC_OK;

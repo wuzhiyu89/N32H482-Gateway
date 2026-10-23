@@ -34,6 +34,31 @@ void crc16_modbus_append(uint8_t *buf, uint16_t data_len);
 uint32_t crc32_ieee(const uint8_t *buf, uint32_t len);
 
 /**
+ * @brief 生成 8 位小写十六进制 msgId（形如 "f1ed8d11"，每次调用都不同）
+ * @param out 输出缓冲区，至少 9 字节（8 个字符 + '\0'）
+ * @param cap out 的总容量
+ * @return true 成功; false 参数非法/缓冲不足
+ * @note  内部用"上电种子 + 自增序号"混洗，不依赖 rand()，不占堆。
+ */
+bool utils_gen_msg_id(char *out, uint16_t cap);
+
+/**
+ * @brief 由事件类型与序号重建 msgId（断线补报用，同一 seq 必须得到同一个 ID）
+ * @param out  输出缓冲区，至少 9 字节
+ * @param cap  out 的总容量
+ * @param salt 事件类型字符（'s' 状态迁移 / 'v' 设备上下线 / 'a' 联动结果）
+ * @param seq  事件序号（event_cache 记录里的 msg_seq）
+ * @return true 成功; false 参数非法/缓冲不足
+ */
+bool utils_gen_msg_id_seq(char *out, uint16_t cap, uint8_t salt, uint16_t seq);
+
+/**
+ * @brief 给 msgId 生成器播种（上电调用一次；不调用则用固定种子）
+ * @param seed 建议混入 SysTick->VAL 等上电抖动
+ */
+void utils_msg_id_seed(uint32_t seed);
+
+/**
  * @brief utf8字符串转十六进制文本字符串
  * @param utf8    输入UTF-8字符串(以'\0'结尾)
  * @param out_hex 输出缓冲区(大写HEX, 无分隔符)

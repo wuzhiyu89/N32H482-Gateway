@@ -31,6 +31,7 @@
 #include "ota_port.h"
 #include "param_save.h"
 #include "serial_proto.h"
+#include "utils.h"
 
 void app_boot_run(void)
 {
@@ -103,6 +104,16 @@ void app_boot_run(void)
     lora_business_init();
     {
         device_param_t *p = param_get_ptr();
+        uint32_t        seed = 0x9E3779B9u ^ (uint32_t)get_tick_ms();
+        uint8_t         i;
+
+        /* msgId 上电播种: 混入网关 UID 与当前时基, 不同设备/不同轮次不撞号 */
+        for (i = 0U; i < CFG_UID_BYTES; i++)
+        {
+            seed = (seed * 33u) + (uint32_t)p->gw_uid[i];
+        }
+        utils_msg_id_seed(seed);
+
         log_info("[BOOT] LoRa OK, 网关 UID=%02X%02X%02X\r\n",
                  p->gw_uid[0], p->gw_uid[1], p->gw_uid[2]);
 
@@ -357,6 +368,10 @@ void app_boot_run(void)
      * 真正的组 JSON + 发 event topic 在本文件的 uplink_publish_device_event()。
      * 这样 LoRa 业务层不用依赖云协议层, 主机测试也就不用为它造 4G 桩。 */
     lora_business_set_sensor_event_cb(app_on_sensor_event);   /* 2026-10-18: 经适配器固定 devType="sensor" */
+
+    /* ★2026-10-22: 平台 lowBatteryPercent 生效 —— 电量越限报 event.device/low_voltage。
+     *   判定+去重(阈值/迟滞/每台只报一次)在 lora_business.c, 这里只挂组包函数。 */
+    lora_business_set_sensor_low_bat_cb(app_on_sensor_low_battery);
 
     /* ★2026-10-18: 每次液位上报(0x02)都通知一次 —— 4G 离线时存进
      *   telemetry_cache, 重连后按原时间戳逐条补报(用户口径: 补的是"每次上报",

@@ -120,6 +120,34 @@ void lora_business_set_sensor_event_cb(lora_sensor_event_fn fn)
     g_sensor_event_cb = fn;
 }
 
+/* ★2026-10-22: 低电量事件回调(平台 lowBatteryPercent 生效) */
+static lora_sensor_low_bat_fn g_low_bat_cb;
+
+void lora_business_set_sensor_low_bat_cb(lora_sensor_low_bat_fn fn)
+{
+    g_low_bat_cb = fn;
+}
+
+/* 按 UID 找该传感器的配置项(找不到返回 NULL) */
+static const cfg_sensor_t *_cfg_sensor_by_uid(const uint8_t uid[LORA_UID_BYTES])
+{
+    const config_store_t *cfg = config_store_get();
+    char    uid_hex[CFG_UID_STR_MAX];
+    uint8_t i;
+
+    if (cfg == NULL) { return NULL; }
+
+    cfg_uid_from_bytes(uid, uid_hex);
+    for (i = 0u; (i < cfg->sensor_count) && (i < (uint8_t)CFG_SENSOR_MAX); i++)
+    {
+        if (strcmp(cfg->sensors[i].uid, uid_hex) == 0)
+        {
+            return &cfg->sensors[i];
+        }
+    }
+    return NULL;
+}
+
 /* ★2026-10-18: 每次液位上报(0x02)的原始数据回调 —— 供主程序做"离线补报" */
 static lora_level_report_fn g_level_report_cb;
 
@@ -220,7 +248,41 @@ static void handle_sensor_report(const lora_frame_t *frame, uint8_t slave_idx,
 
     const uint8_t *d = frame->data;
     uint16_t level_mm  = ((uint16_t)d[0] << 8) | (uint16_t)d[1];   /* 大端 */
-    uint16_t bat_pct   = d[2];        /* 注意: 旧 local_gateway 里叫 bat_mv(电压), 协议里实际是电量% */
+    uint8_t  bat_pct   = d[2];    /* 注意: 旧 local_gateway 里叫 bat_mv(电压), 协议里实际是电量% */
+    /* ★2026-10-22: 低电量事件(平台 lowBatteryPercent 生效)★
+     * 阈值 0 = 禁用。越过阈值报一次 low_voltage; 电量回到 阈值+5% 以上才复位,
+     * 避免在阈值附近抖动时每包都报。状态存在从机表(low_bat_reported)里,
+     * 掉电重启后重新判断一次(符合"新的上电周期重新报一次"的直觉)。 */
+    {
+        lora_slave_t       *ss = &g_slave_list[slave_idx];
+        const cfg_sensor_t *cs = _cfg_sensor_by_uid(frame->dev_uid);
+        uint16_t            thr = (cs != NULL) ? (uint16_t)cs->low_battery_pct : 0u;
+
+        if (thr > 0u)
+        {
+            if (!ss->low_bat_reported && (bat_pct <= thr))
+            {
+                char uid[CFG_UID_STR_MAX];
+
+                ss->low_bat_reported = true;
+                cfg_uid_from_bytes(ss->dev_uid, uid);
+                log_info("[GW] 液位 %s 低电量: %u%% <= 阈值 %u%%, 上报 low_voltage 事件\r\n",
+                         uid, (unsigned)bat_pct, (unsigned)thr);
+                if (g_low_bat_cb != NULL)
+                {
+                    g_low_bat_cb(uid, (uint8_t)bat_pct);
+                }
+            }
+            else if (ss->low_bat_reported && (bat_pct >= (thr + 5u)))
+            {
+                ss->low_bat_reported = false;   /* 电量回升, 下次越限可以再报 */
+            }
+        }
+        else
+        {
+            ss->low_bat_reported = false;       /* 阈值 0 = 禁用 */
+        }
+    }
 
     /* 【时间不用液位报的, 用 4G 的】—— 现场要求
      *   液位自己的 RTC 常年可能是没校时的(现场日志里它一直打 "NOT-SYNCED",
@@ -303,28 +365,34 @@ static void handle_sensor_report(const lora_frame_t *frame, uint8_t slave_idx,
  *
  * ⚠️ 打开后设备 RTC 每轮上报都会被校到下面那个固定时间。
  *
- * 载荷布局(13 字节, 小端, 与设备端 app_cmd.h / app_cmd.c 完全一致):
- *   off0-1 检测间隔 1200 秒 = 20 分钟 -> 0x04B0
- *   off2-3 上报间隔 1800 秒 = 30 分钟 -> 0x0708
+ * 载荷布局(18 字节, 小端, 与设备端 app_cmd.h / app_cmd.c 完全一致):
+ *   off0-2 上报间隔 1800 秒 = 30 分钟 -> 0x000708
  *   （★单位是【秒】, 网关不换算, 设备端也按秒用 —— 见 LORA_SENSOR_PERIOD_MIN_S ★）
- *   off4   相同液位上报 1
- *   off5-6 液位告警阈值 500mm -> 0x01F4
- *   off7 year off8 month off9 day off10 week off11 hour off12 minute
+ *   off3   相同液位上报 1
+ *   off4-5 液位告警阈值 50mm -> 0x0032
+ *   off6   测量模式 0=液位 1=距离
+ *   off7-8 安装高度 cm  off9-10 校准偏移 mm(int16)  off11 低电量阈值%
+ *   off12 year off13 month off14 day off15 week off16 hour off17 minute
  *   ⚠️ 16 位字段必须【低字节在前】, 写成大端会被设备解成 512/256/62465 这种乱值。
+ *   ★2026-10-22: 取消检测间隔、上报间隔扩到 3 字节、新增 4 个设备侧参数
+ *   -> 原 13 字节变 18 字节。
  */
 #ifndef LORA_LEVEL_PUSH_DEFAULT
 #define LORA_LEVEL_PUSH_DEFAULT   0     /* 1 = 台架无 4G 时补固定参数 */
 #endif
 
 /* 单位【秒】(2026-10-05 改版, 与上面的 LORA_SENSOR_PERIOD_MIN_S 同一口径):
- *   检测间隔 1200s = 20 分钟, 上报间隔 1800s = 30 分钟, 阈值 500mm。 */
-static const uint8_t LORA_LEVEL_DEFAULT_DATA[13] =
+ *   上报间隔 1800s = 30 分钟, 阈值 50mm; 其余设备侧参数取中性默认值。 */
+static const uint8_t LORA_LEVEL_DEFAULT_DATA[18] =
 {
-    0xB0U, 0x04U,        /* off0-1  检测间隔 1200 秒 = 20 分钟 (0x04B0 小端) */
-    0x08U, 0x07U,        /* off2-3  上报间隔 1800 秒 = 30 分钟 (0x0708 小端) */
-    0x01U,               /* off4    相同液位也上报 */
-    0xF4U, 0x01U,        /* off5-6  告警阈值 500mm (0x01F4 小端) */
-    26U, 9U, 18U, 5U, 13U, 25U   /* off7-12 校时: 2026-09-18 周五 13:25 */
+    0x08U, 0x07U, 0x00U,  /* off0-2  上报间隔 1800 秒 = 30 分钟 (0x000708 小端) */
+    0x01U,               /* off3    相同液位也上报(协议固定 1) */
+    0x32U, 0x00U,        /* off4-5  告警阈值 50mm (0x0032 小端) */
+    0x00U,               /* off6    测量模式 0=液位 */
+    0x00U, 0x00U,        /* off7-8  安装高度 0cm */
+    0x00U, 0x00U,        /* off9-10 校准偏移 0mm */
+    0x00U,               /* off11   低电量阈值 0 = 禁用 */
+    26U, 9U, 18U, 5U, 13U, 25U   /* off12-17 校时: 2026-09-18 周五 13:25 */
 };
 
 static void _schedule_default_level_downlink(const uint8_t dev_uid[CFG_UID_BYTES])
@@ -342,7 +410,7 @@ static void _schedule_default_level_downlink(const uint8_t dev_uid[CFG_UID_BYTES
                                LORA_LEVEL_DEFAULT_DATA,
                                (uint8_t)sizeof(LORA_LEVEL_DEFAULT_DATA)) == 0)
     {
-        log_info("[GW] 该设备下发缓存为空, 已补一条默认 0x01 参数(1200s/1800s/500mm), "
+        log_info("[GW] 该设备下发缓存为空, 已补一条默认 0x01 参数(1800s/50mm), "
                  "稍后随应答一起下发\r\n");
     }
     else
@@ -422,7 +490,17 @@ static void handle_ack_from_device(const lora_frame_t *frame, uint8_t slave_idx)
             s->retry_cnt      = 0U;
             s->alarm_pending  = false;
             s->alarm_attempts = 0U;
-            data_cache_down_del_by_uid(s->dev_uid);
+            /* ★2026-10-23 P1: 改成"条件删除"★
+             * 0x80 到 0x82 大约 10 秒, 云端完全可能在这期间下发【新档位】,
+             * 而缓存是"每台一条"(后到顶掉前到)。以前这里按 uid 无条件删,
+             * 把那条新指令一起删掉了 —— 平台以为成功、设备停在旧档位,
+             * 且不会再重试。现在只有"缓存里还是刚发出去的那条"才删。 */
+            if (!data_cache_down_del_if_match(s->dev_uid, s->pending_func,
+                                              s->pending_data, s->pending_data_len))
+            {
+                log_info("[GEAR] %02X%02X%02X 已有一条更新的指令在缓存里, 保留待发\r\n",
+                         s->dev_uid[0], s->dev_uid[1], s->dev_uid[2]);
+            }
             log_info("[GEAR] ★%02X%02X%02X 执行成功(0x82)★ 档位 %u\r\n",
                      s->dev_uid[0], s->dev_uid[1], s->dev_uid[2], (unsigned)s->alarm_gear);
             /* ★2026-10-18 (丙): 之前判过离线? 这一拍成功就是"恢复" ★
@@ -451,8 +529,14 @@ static void handle_ack_from_device(const lora_frame_t *frame, uint8_t slave_idx)
 
     if (frame->func == LORA_FUNC_RESP_OK)
     {
-        /* 成功 —— 清除下发缓存 */
-        data_cache_down_del_by_uid(s->dev_uid);
+        /* 成功 —— 清除下发缓存(★条件删除: 等待 ACK 期间云端可能已下发新指令,
+         * 无条件按 uid 删会把那条新的连带删掉, 见 data_cache.h 的说明) */
+        if (!data_cache_down_del_if_match(s->dev_uid, s->pending_func,
+                                          s->pending_data, s->pending_data_len))
+        {
+            log_info("[GW] %02X%02X%02X 已确认, 但缓存里是更新的指令 -> 保留待发\r\n",
+                     s->dev_uid[0], s->dev_uid[1], s->dev_uid[2]);
+        }
     }
     /* 如果是 ERR —— 保留缓存, 让下次设备上报时 lora_try_send_downlink 再发 */
 }

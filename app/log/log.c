@@ -1,4 +1,4 @@
-﻿/**
+/**
 *     Copyright (c) 2023, Nations Technologies Inc.
 * 
 *     All rights reserved.
@@ -85,7 +85,11 @@ void log_init(void)
     GPIO_InitPeripheral(LOG_GPIO, &GPIO_InitStructure);
 
     //RX PA10 复用输入
+    /* ★2026-10-23: 必须上拉。串口助手(USB-TTL)拔掉后 PA10 悬空, 噪声会被
+     * 当成 AT 命令转发给 4G 模组, 把模组干扰到重启(+MATREADY)。UART 空闲态
+     * 本来就是高电平, 内部上拉不影响正常通信, 只把"悬空"钉成稳定 idle。 */
     GPIO_InitStructure.Pin             = LOG_RX_PIN;
+    GPIO_InitStructure.GPIO_Pull       = GPIO_PULL_UP;
     GPIO_InitStructure.GPIO_Alternate  = LOG_RX_AF;
     GPIO_InitPeripheral(LOG_GPIO, &GPIO_InitStructure);
 

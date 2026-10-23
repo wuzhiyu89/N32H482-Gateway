@@ -56,6 +56,17 @@ void USART1_IRQHandler(void)
         uint8_t  ch   = (uint8_t)(USART_ReceiveData(USART1) & 0xFFU);
         uint16_t next = (uint16_t)((s_con_wr + 1U) % CONSOLE_BUF_SIZE);
 
+        /* ★2026-10-23: 只收 ASCII 可打印字符与 \r\n。
+         * 拔掉串口助手后 PA10 会悬空拾取噪声, 这些字节原来会被拼成随机"行",
+         * 再被当成 AT 命令转发给 4G 模组 -> 模组被乱码干扰到重启(+MATREADY),
+         * 同时乱码里的 \r 会让终端日志覆盖/错位。这里从源头丢掉不可打印字节,
+         * 硬件上拉(log_init)是第二道防线。 */
+        if (((ch < 0x20U) || (ch > 0x7EU)) && (ch != (uint8_t)'\r') && (ch != (uint8_t)'\n'))
+        {
+            USART_ClrFlag(USART1, USART_FLAG_RXDNE);
+            return;
+        }
+
         if (next != s_con_rd)   /* 满则丢弃, 不覆盖未处理数据 */
         {
             s_con_buf[s_con_wr] = ch;
@@ -101,6 +112,16 @@ void app_console_poll(void)
                     continue;
                 }
 #endif
+                /* ★2026-10-23: 只转发 AT 命令。噪声即使凑成可打印字符, 也几乎
+                 * 不可能刚好以 "AT" 开头; 这条把随机行彻底挡在模组之外。
+                 * (非 AT 行静默丢弃 —— 噪声场景下打印反而会刷屏。) */
+                if (!(((s_con_line[0] == 'A') || (s_con_line[0] == 'a')) &&
+                      ((s_con_line[1] == 'T') || (s_con_line[1] == 't'))))
+                {
+                    len = 0U;
+                    continue;
+                }
+
                 /* 其它行: 整行当 AT 命令转发给 4G 模组。
                  * (以前这里还支持"以 { 开头当云端 JSON 喂给下行处理函数",
                  *  那个台架后门已经删掉了 —— 下行只走 4G/MQTT。) */

@@ -62,9 +62,7 @@ extern uint8_t  fake_pair_dev_type;   /* ★ 第 11 条: dev.bind 的 type(1/2/3
  * 用来断言"cloud_proto 确实把参数交给了业务层, 且单位/数值没被改写"。 */
 extern int      fake_sensor_param_calls;      /* 被调用次数 */
 extern char     fake_sensor_param_uid[27];    /* 最后一次的 uid */
-extern uint16_t fake_sensor_param_detect_s;   /* 最后一次的检测间隔(秒) */
-extern uint16_t fake_sensor_param_report_s;   /* 最后一次的上报间隔(秒) */
-extern int      fake_sensor_param_same;       /* 最后一次的"相同液位也上报" */
+extern uint32_t fake_sensor_param_report_s;   /* 最后一次的上报间隔(秒) */
 extern uint16_t fake_sensor_param_thresh_mm;  /* 最后一次的阈值 mm */
 extern int      fake_sensor_param_ret;        /* 让替身返回这个值(默认 true) */
 
