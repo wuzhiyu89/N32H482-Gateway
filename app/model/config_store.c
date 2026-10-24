@@ -96,7 +96,12 @@ typedef char cfg_bank_present[(FM_HAS_CFG_BANK != 0) ? 1 : -1];
 /* 够放满配 JSON */
 typedef char cfg_json_fits[(sizeof(config_store_t) <= CFG_JSON_MAX) ? 1 : -1];
 
-/** 每区头部(24 字节, 全 uint32 → 无填充/无对齐坑, 8 字节对齐) */
+/** 每区头部(32 字节, 全 uint32 → 无填充; ★必须 8 字节的整数倍★)
+ *
+ * ★2026-10-24 bugfix: 加 seq 后这里一度是 28 字节 —— cfg_port_write() 用
+ *   FLASH_ProgramdoubleWord() 写, 要求偏移 8 字节对齐; JSON 从 28 开始写就
+ *   不是 8 的倍数 -> 编程失败 -> 每次保存/绑定都回 CFG_ERR_FLASH(5)。
+ *   补一个保留字凑到 32 字节, 并用下面的静态断言钉住。 */
 typedef struct
 {
     uint32_t magic;
@@ -105,8 +110,12 @@ typedef struct
     uint32_t updated_at;
     uint32_t json_len;
     uint32_t seq;           /* ★每次落盘 +1: 双区载入据此判断谁新(不依赖时钟) */
-    uint32_t hdr_crc;       /* 前 24 字节的 CRC32 */
+    uint32_t rsv;           /* 对齐填充: 必须 0 */
+    uint32_t hdr_crc;       /* 前 28 字节的 CRC32 */
 } cfg_bank_hdr_t;
+
+_Static_assert((sizeof(cfg_bank_hdr_t) % 8u) == 0u,
+               "cfg_bank_hdr_t 必须是 8 字节的整数倍(Flash 双字编程要求)");
 
 #define CFG_BANK_MAGIC      0x47435452u     /* 'R''T''C''G' */
 
@@ -244,6 +253,11 @@ static cfg_result_t cfg_port_write(uint8_t bank, uint32_t off,
                                    const uint8_t *buf, uint16_t len)
 {
     if (((uint32_t)len + off) > CFG_BANK_SIZE) { return CFG_ERR_PARAM; }
+
+    /* ★与真机一致: FLASH_ProgramdoubleWord 要求偏移 8 字节对齐★
+     * 真机上不对齐会直接写失败(曾因头部 28 字节导致每次保存回 code=5),
+     * 主机这里也拦住, 否则测试发现不了。 */
+    if ((off % 8u) != 0u) { return CFG_ERR_FLASH; }
 
     /* 主机测试注入的写失败(目标板不会走到这里): 用来验证上层"失败不回 code=0" */
     if (s_test_fail_write > 0)
