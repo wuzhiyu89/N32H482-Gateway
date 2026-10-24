@@ -741,6 +741,39 @@ void lora_business_init(void)
     g4_urc_set_recv_cb(lora_mqtt_recv_cb);
 }
 
+void lora_business_ensure_slaves(void)
+{
+    const config_store_t *cfg = config_store_get();
+    uint8_t               uid[CFG_UID_BYTES];
+    uint8_t               i;
+
+    if (cfg == NULL) { return; }
+
+    /* 液位传感器 */
+    for (i = 0U; (i < cfg->sensor_count) && (i < (uint8_t)CFG_SENSOR_MAX); i++)
+    {
+        if (!cfg_uid_to_bytes(cfg->sensors[i].uid, uid)) { continue; }
+        if (lora_slave_find(uid) == 0xFFU)
+        {
+            (void)lora_slave_add(uid, SLAVE_TYPE_SENSOR);
+            log_info("[GW] 配置里的液位 %s 不在从机表 -> 运行期补登记\r\n",
+                     cfg->sensors[i].uid);
+        }
+    }
+
+    /* 联动设备(声光等) */
+    for (i = 0U; (i < cfg->device_count) && (i < (uint8_t)CFG_DEVICE_MAX); i++)
+    {
+        if (!cfg_uid_to_bytes(cfg->devices[i].uid, uid)) { continue; }
+        if (lora_slave_find(uid) == 0xFFU)
+        {
+            (void)lora_slave_add(uid, SLAVE_TYPE_ALARM_OUT);
+            log_info("[GW] 配置里的设备 %s 不在从机表 -> 运行期补登记\r\n",
+                     cfg->devices[i].uid);
+        }
+    }
+}
+
 void lora_business_poll(void)
 {
     /* 1. 协议层 poll (radio 中断 + 帧解析 + 分发 on_frame) */

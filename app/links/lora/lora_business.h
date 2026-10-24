@@ -234,6 +234,15 @@ void lora_business_field_cancel(void);
 void lora_business_init(void);
 
 /**
+ * \brief 按当前 config_store 的 sensors[]/devices[] 【补登记】缺失的从机
+ *
+ * lora_slave_load() 只在启动时跑一次; 平台在运行期用 cfg.set 新增设备时,
+ * 从机表不会自动更新 —— 之后发指令/解绑都会报"不在从机表"。
+ * 本函数只做"加", 不清表、不改已有条目的状态(不掉 WAIT_ACK / 绑定窗口)。
+ */
+void lora_business_ensure_slaves(void);
+
+/**
  * \brief 业务层轮询 (main while(1) 持续调):
  *          协议层 poll → 帧分发 → ACK 超时重传检测
  */

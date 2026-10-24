@@ -174,6 +174,9 @@ int cloud_cmd_cfg_set(const cloud_req_t *req, cJSON *data)
             /* 落盘成功才提交给"当前配置"实例 —— 紧接着的 cfg.query 才能读到新值 */
             live = config_store_get_mut();
             (void)memcpy(live, &cloud_cfg_staging_buf, sizeof(*live));
+
+            /* 运行期新增的 sensors[]/devices[] 必须进从机表, 否则下发/解绑报 1003 */
+            lora_business_ensure_slaves();
         }
     }
 
@@ -391,6 +394,7 @@ int cloud_cmd_sys_factory_reset(const cloud_req_t *req, cJSON *data)
 
     /* 落盘成功才提交给"当前配置"实例 */
     (void)memcpy(config_store_get_mut(), &s_cfg_reset_tmp, sizeof(s_cfg_reset_tmp));
+    lora_business_ensure_slaves();     /* 出厂后表里只剩配置中的设备(旧条目保留, 不再发) */
 
     /* ★★2026-10-11 补: 恢复出厂时【cloud_profile 也要回默认】★★
      * --------------------------------------------------------------------------

@@ -67,3 +67,5 @@ extern uint16_t fake_sensor_param_thresh_mm;  /* 最后一次的阈值 mm */
 extern int      fake_sensor_param_ret;        /* 让替身返回这个值(默认 true) */
 
 #endif /* FAKE_LORA_BUSINESS_H */
+
+void lora_business_ensure_slaves(void);

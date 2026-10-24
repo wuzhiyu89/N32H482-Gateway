@@ -359,6 +359,9 @@ int cloud_commit_config(const config_store_t *tmp)
 
     live = config_store_get_mut();
     (void)memcpy(live, tmp, sizeof(*live));
+
+    /* 配置里可能新增/改了设备 -> 从机表同步补登记, 否则后续下发报"不在从机表" */
+    lora_business_ensure_slaves();
     return CLOUD_EC_OK;
 }
 

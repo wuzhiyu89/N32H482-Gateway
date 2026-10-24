@@ -1133,7 +1133,13 @@ int lora_business_send_req(const uint8_t uid[CFG_UID_BYTES], slave_type_t dev_ty
     /* 【从机表是动态白名单】: 地址不在表里就直接拒掉 —— 设备必须先经 0x04 绑定
      * 进表(写 config_store + g_slave_list)才会被这里找到。 */
     idx = lora_slave_find(uid);
-    if (idx == 0xFFU) return -2;
+    if (idx == 0xFFU)
+    {
+        /* 运行期 cfg.set 刚写入设备、表还是启动那份 -> 按配置补登记再找 */
+        lora_business_ensure_slaves();
+        idx = lora_slave_find(uid);
+        if (idx == 0xFFU) return -2;
+    }
 
     /* 表里的 dev_type 在绑定时确定, 运行期不变。调用方传进来的如果和表不一致,
      * 以表为准并告警(避免一个地址被当成两种设备) */

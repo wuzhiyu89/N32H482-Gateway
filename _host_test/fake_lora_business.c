@@ -202,3 +202,5 @@ lora_dev_state_t lora_business_device_state_bytes(const uint8_t uid[LORA_UID_BYT
     (void)uid;
     return fake_device_state;
 }
+
+void lora_business_ensure_slaves(void) { }

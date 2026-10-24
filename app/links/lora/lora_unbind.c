@@ -319,7 +319,14 @@ int lora_business_unbind(const char *uid_hex)
     if (!cfg_uid_to_bytes(uid_hex, uid)) return -1;
 
     uint8_t idx = lora_slave_find(uid);
-    if (idx == 0xFFU) return -2;
+
+    if (idx == 0xFFU)
+    {
+        /* 运行期 cfg.set 刚写入设备 -> 先按配置补登记 */
+        lora_business_ensure_slaves();
+        idx = lora_slave_find(uid);
+        if (idx == 0xFFU) return -2;
+    }
 
     /* 防重: g_unbind 已在跟踪(同一台或另一台) → 拒绝, 避免空口噪声 */
     if (g_unbind.state != UNBIND_IDLE)
