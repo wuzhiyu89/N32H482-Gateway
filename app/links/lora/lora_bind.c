@@ -300,18 +300,41 @@ void lora_bind_handle_dev_ack(const lora_frame_t *frame)
      *   刚加进运行期表的设备被回滚掉、事件报 bind_failed, 但 config_store 内部
      *   其实已经 save 落 Flash 了 —— 结果"云端看到绑定失败, 重启后设备又冒出来"。
      * (2026-09-29 评审修正) */
-    uint32_t now_ts = cloud_proto_get_now_ts();
-    if (config_store_bind_device(uid_hex, g_bind.expected_serial,
-                                 g_bind.expected_name, g_bind.is_sensor,
-                                 g_bind.dev_type,
-                                 now_ts) != CFG_OK)
+    uint32_t     now_ts = cloud_proto_get_now_ts();
+    cfg_result_t wr     = config_store_bind_device(uid_hex, g_bind.expected_serial,
+                                                   g_bind.expected_name, g_bind.is_sensor,
+                                                   g_bind.dev_type, now_ts);
+
+    if (wr == CFG_ERR_RANGE)
     {
-        log_info("[BIND] !! config_store_bind_device 失败, 回滚运行期表\r\n");
+        /* ★2026-10-24 bugfix: 配置里已经有这个 UID★
+         *
+         * 典型场景: 平台先用 cfg.set 把 sensors[]/devices[] 下发下来(设备此时
+         * 还没完成 0x04 绑定), 随后设备发起绑定 -> 运行期表是空的, lora_slave_add
+         * 成功, 但 config_store_bind_device 的查重命中 -> 返回 CFG_ERR_RANGE。
+         *
+         * 旧代码把它当失败: 【删掉刚加进运行期表的条目】+ 发 bind_failed
+         *   -> 现象正是"云端 cfg.query 里明明有设备, 网关从机表却是空的,
+         *      而且绑定报失败"。
+         *
+         * 正确语义: 这不是新设备, 是"配置已存在、只差一次握手" -> 走重绑,
+         * 只覆盖 serial/name(运行参数一律不动), 运行期表保留。 */
+        log_info("[BIND] %s 已在配置里(平台先下发过) -> 走重绑, 不新增条目\r\n", uid_hex);
+        wr = config_store_rebind_device(uid_hex, g_bind.expected_serial,
+                                        g_bind.expected_name, g_bind.dev_type, now_ts);
+    }
+
+    if (wr != CFG_OK)
+    {
+        log_info("[BIND] !! 写 config_store 失败(code=%d), 回滚运行期表\r\n", (int)wr);
         (void)lora_slave_del(g_bind.pending_uid);
         lora_bind_fire_event(uid_hex, g_bind.is_sensor, LORA_BIND_EVENT_BIND_FAILED);
         g_bind.state = BIND_IDLE;
         return;
     }
+
+    /* 配置里可能还有别的设备(平台下发过) -> 顺手补登记, 保证后续下发都能找到 */
+    lora_business_ensure_slaves();
 
     /* 4) 绑定成功 */
     /* 给液位排一条 0x01 配置同步 —— 修"绑完第一包不带配置" */
