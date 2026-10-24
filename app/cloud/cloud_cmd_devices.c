@@ -838,33 +838,24 @@ int cloud_cmd_dev_ctrl(const cloud_req_t *req, cJSON *data)
         return CLOUD_EC_PARAM;
     }
 
-    /* 只对【没给】的字段套模板。给的(哪怕是空串)一律不动。 */
-    if ((!given1) || (!given2) || (!givenT))
-    {
-        int32_t lv = 0;
-        uint8_t dummy_gear = 0u;
-
-        /* 当前水位由评估模块给(避免在这里再实现"取最大") */
-        if (level_supervisor_last(&lv, &dummy_gear))
-        {
-            if (!given1)
-            {
-                (void)level_render_template(led1, (uint16_t)sizeof(led1),
-                                            cfg->gears[gear].led_text1, lv);
-            }
-            if (!given2)
-            {
-                (void)level_render_template(led2, (uint16_t)sizeof(led2),
-                                            cfg->gears[gear].led_text2, lv);
-            }
-            if (!givenT)
-            {
-                (void)level_render_template(tts, (uint16_t)sizeof(tts),
-                                            cfg->gears[gear].tts_text, lv);
-            }
-        }
-        /* 还没给 且 没有过有效水位: 文本留空 —— 只切档位/灯光, 不改文案(而不是把屏幕清空) */
-    }
+    /* ★★2026-10-24 用户口径: 云端手动控制【不做任何文字填充】★★
+     *
+     * 【现象】dev.ctrl 只给了 ledText1("早上好"), ledText2 / ttsText 为空(或没给),
+     *   网关却把 gears[gear] 里的模板(路面积水{level}CM / 缓慢通行 / TTS)填了上去,
+     *   平台看到"我说空, 结果又冒出档位文字"。
+     *
+     * 【为什么以前会填】老逻辑把"字段没出现"当成"用档位模板 + 当前水位渲染"。
+     *   但手动控制是【平台明确指定文案】的场景, 平台没给就是"不要这段文字",
+     *   不是"帮我按档位补一段"。
+     *
+     * 【现在的语义】dev.ctrl 只做透传:
+     *   · 字段出现(含 "") -> 原样使用;
+     *   · 字段没出现       -> 留空(什么都不发), 绝不拿档位模板补。
+     * 档位模板的渲染只保留在【边缘联动】那条路径(level_supervisor -> 0x03),
+     * 那条才是"网关自己按水位决定文案"的地方。
+     *
+     * 说明: 平台给了的文字里的 {level} 仍然会被替换(见下面那段 2026-10-14 的修复),
+     *       这与"不自动填充"不冲突 —— 一个是替换占位符, 一个是凭空补文案。 */
 
     /* ==========================================================================
      * ★★2026-10-14 修复: 平台【给的】文字也要过 {level} 渲染 ★★

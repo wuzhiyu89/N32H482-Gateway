@@ -4253,6 +4253,23 @@ static void test_dev_ctrl(void)
     CHECK(strcmp(fake_gear_last_tts, "手动语音") == 0,
           "★ ttsText 覆盖生效 (实际 \"%s\")", fake_gear_last_tts);
 
+    /* ---- 2b) ★2026-10-24 回归: 只给 ledText1, 没给的 tts 必须为空 ★ ----
+     * 旧逻辑会把"没给的字段"拿 gears[gear] 的模板渲染后填上去, 现象是
+     * dev.ctrl 只发 ledText1("早上好"), 设备却同时收到档位模板的 TTS/LED2。
+     * 手动控制必须透传: 没给就是空。 */
+    fake_lora_business_reset();
+    fake_gear_total = 1;  fake_gear_ret = 1;
+    rc = cloud_proto_handle("{\"cmd\":\"dev.ctrl\",\"msgId\":\"ct2b\",\"ts\":1,"
+                            "\"data\":{\"uid\":\"31000000000000000000000001\",\"gear\":3,"
+                            "\"ledText1\":\"早上好\"}}",
+                            1u, s_big_resp, (uint16_t)sizeof(s_big_resp), &rl);
+    CHECK(rc == CLOUD_EC_OK, "只给 ledText1 -> OK (rc=%d)", rc);
+    CHECK(strcmp(fake_gear_last_led, "早上好") == 0,
+          "★ 给的 ledText1 原样下发 (实际 \"%s\")", fake_gear_last_led);
+    CHECK(fake_gear_last_tts[0] == '\0',
+          "★★ 没给的 ttsText 必须为空, 不得自动填档位模板 (实际 \"%s\")",
+          fake_gear_last_tts);
+
     /* ---- 3) 目标不存在(total=0) -> 1003 ---- */
     fake_lora_business_reset();
     fake_gear_total = 0;  fake_gear_ret = 0;
