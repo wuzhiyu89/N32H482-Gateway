@@ -829,8 +829,11 @@ static void test_cfg_query_handler(void)
         CHECK(dsub != NULL, "能在应答里取到 data 子对象");
         if (dsub != NULL)
         {
-            CHECK(config_store_from_json(&b, dsub) == CFG_OK,
-                  "★ 应答 data 能被 config_store_from_json 读回(含 CRC 自校验)");
+            {
+                cfg_result_t rr = config_store_from_json(&b, dsub);
+                CHECK(rr == CFG_OK,
+                      "★ 应答 data 能被 config_store_from_json 读回(含 CRC 自校验) (code=%d)", (int)rr);
+            }
             CHECK(b.meta.config_version == 3u, "读回的 configVersion = 3");
             CHECK(b.sensor_count == 1u && strcmp(b.sensors[0].name, "东入口") == 0,
                   "读回的传感器内容一致");
@@ -2440,20 +2443,20 @@ static void test_rule_set(void)
 
     cloud_live_reset(3u);                   /* 版本 3, 出厂 gears(0~3, targets=all) */
 
-    /* ---- 正常: 只改 2 号档的 soundMode 与文本 ---- */
+    /* ---- 正常: 只改 2 号档的 flashMode 与文本 ---- */
     rc = cloud_proto_handle(
         "{\"cmd\":\"rule.set\",\"msgId\":\"rs1\",\"ts\":1000,\"data\":{\"gears\":["
-        "{\"gear\":2,\"soundMode\":2,\"ledTextTemplate1\":\"改过的{level}CM\"}]}}",
+        "{\"gear\":2,\"flashMode\":2,\"ledTextTemplate1\":\"改过的{level}CM\"}]}}",
         1000u, s_big_resp, (uint16_t)sizeof(s_big_resp), &rl);
     CHECK(rc == CLOUD_EC_OK, "rule.set 只改 2 号档 -> 成功 (rc=%d)", rc);
     CHECK(strstr(s_big_resp, "\"configVersion\":4") != NULL,
           "应答带上了新 configVersion=4");
-    CHECK(config_store_get()->gears[2].sound_mode == 2u, "2 号档 soundMode 改了");
+    CHECK(config_store_get()->gears[2].sound_mode == 2u, "2 号档 flashMode 改了");
     CHECK(strcmp(config_store_get()->gears[2].led_text1, "改过的{level}CM") == 0,
           "2 号档文本1改了");
     CHECK(config_store_get()->gears[2].gear == 2u, "★ 槽位不变量 gear==2 仍成立");
     CHECK(config_store_get()->gears[0].sound_mode == 0u,
-          "★ 0 号档没被动(soundMode 仍是 0)");
+          "★ 0 号档没被动(flashMode 仍是 0)");
     CHECK(strcmp(config_store_get()->gears[1].led_text1,
                  "路面积水{level}CM") == 0,
           "★ 1 号档的文本保持原值(未提及的档位不动)");
@@ -2469,7 +2472,7 @@ static void test_rule_set(void)
     /* ---- 只允许改 gears: 夹带别的域 -> 1001, 且配置不动 ---- */
     rc = cloud_proto_handle(
         "{\"cmd\":\"rule.set\",\"msgId\":\"rs2\",\"ts\":1,\"data\":{\"gears\":["
-        "{\"gear\":1,\"soundMode\":1}],\"thresholds\":{\"alarmCm\":50}}}",
+        "{\"gear\":1,\"flashMode\":1}],\"thresholds\":{\"alarmCm\":50}}}",
         1u, s_big_resp, (uint16_t)sizeof(s_big_resp), &rl);
     CHECK(rc == CLOUD_EC_PARAM, "★ 夹带 thresholds -> 1001 (rc=%d)", rc);
     CHECK(config_store_get()->gears[1].sound_mode == 1u,
@@ -2484,15 +2487,15 @@ static void test_rule_set(void)
 
     /* ---- 缺 gear 字段 -> 校验拒 -> 1001 ---- */
     rc = cloud_proto_handle("{\"cmd\":\"rule.set\",\"msgId\":\"rs4\",\"ts\":1,"
-                            "\"data\":{\"gears\":[{\"soundMode\":1}]}}",
+                            "\"data\":{\"gears\":[{\"flashMode\":1}]}}",
                             1u, s_big_resp, (uint16_t)sizeof(s_big_resp), &rl);
     CHECK(rc == CLOUD_EC_PARAM, "★ 缺 gear 字段 -> 1001 (rc=%d)", rc);
 
-    /* ---- 非法值(soundMode=9) -> 校验整域拒 -> 1001 ---- */
+    /* ---- 非法值(flashMode=9) -> 校验整域拒 -> 1001 ---- */
     rc = cloud_proto_handle("{\"cmd\":\"rule.set\",\"msgId\":\"rs5\",\"ts\":1,"
-                            "\"data\":{\"gears\":[{\"gear\":3,\"soundMode\":9}]}}",
+                            "\"data\":{\"gears\":[{\"gear\":3,\"flashMode\":9}]}}",
                             1u, s_big_resp, (uint16_t)sizeof(s_big_resp), &rl);
-    CHECK(rc == CLOUD_EC_PARAM, "★ 非法 soundMode -> 1001 (rc=%d)", rc);
+    CHECK(rc == CLOUD_EC_PARAM, "★ 非法 flashMode -> 1001 (rc=%d)", rc);
     CHECK(config_store_get()->gears[3].sound_mode == 3u,
           "★ 被拒后 3 号档未被改坏(仍是出厂默认 3 = 快闪)");
 

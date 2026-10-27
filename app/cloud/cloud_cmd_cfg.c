@@ -288,35 +288,39 @@ int cloud_cmd_cfg_query(const cloud_req_t *req, cJSON *data)
     }
 
     /* data 对象已经由 cloud_proto_handle() obj_begin 过了, 这里只写成员 */
-    if (!config_store_write_members(data, config_store_get()))
+    /* ★2026-10-27: 用一份"掩码副本"生成应答★
+     * 直接把 live 写出去再改 username/password 会导致 meta.crc32 与内容不一致
+     * (读回自校验必失败)。这里复制一份、掩码后由同一个写入器生成, CRC 自然正确。 */
     {
-        return CLOUD_EC_INTERNAL;           /* 池满 */
-    }
+        static config_store_t qcfg;      /* 4KB static; 单线程命令处理, 不重入 */
 
-    /* ★★2026-10-09 用户要求: 应答里的 network.password 固定返回 5 个 '*' ★★
-     * --------------------------------------------------------------------------
-     * 【为什么要掩码】broker 密码是敏感信息, 而 cfg.query 的应答会经 MQTT 下发,
-     *   任何能发 cfg.query 或订阅 rt/gw/{gwId}/cmdresp 的一方都能看到明文
-     *   (平台第 4 轮报告 §6.2 N6 也提了这条)。
-     *
-     * 【为什么改在这里, 而不是 config_store 的写出函数里】
-     *   ⚠️ config_store_write_members() 很可能【同时】被"生成应答"和"序列化到
-     *     Flash"两条路使用 —— 在那里掩码会把 '*****' 真的写进 Flash, 把真密码毁掉。
-     *   改在 cfg.query 这一条路径上, 只影响"读出去的文本", 碰不到存储 ✓
-     *
-     * 【固定 5 个 *, 不是回显长度】用户口径: 固定 "*****"。
-     *   用固定串而不是按长度生成, 是为了不泄露密码长度。
-     *
-     * ⚠️【配套风险, 见 cfg 的 set 侧】平台如果把这 5 个 '*' 原样回传 cfg.set,
-     *   就会把密码真的设成 "*****"。⇒ set 侧必须把恰为 "*****" 的入参当作
-     *   "不修改" 跳过(见 config_store.c 里 network.password 的取值处)。 */
-    {
-        cJSON *net = cJSON_GetObjectItem(data, "network");
-
-        if (net != NULL)
+        (void)memcpy(&qcfg, config_store_get(), sizeof(qcfg));
+        (void)strcpy(qcfg.network.username, "*****");
+        (void)strcpy(qcfg.network.mqtt_password, "*****");
+        if (!config_store_write_members(data, &qcfg))
         {
-            cJSON_DeleteItemFromObject(net, "password");
-            (void)cJSON_AddStringToObject(net, "password", "*****");
+            return CLOUD_EC_INTERNAL;
+        }
+
+        /* ★CRC 的特殊口径★ 解析器把 password=="*****" 当"不修改"跳过,
+         * 于是 from_json 读回时 password 仍是出厂空串。为了让 meta.crc32 与
+         * "读回后的配置"一致, 这里把 qcfg 的 password 置空再算一次 CRC(仅用于 CRC;
+         * 应答里的 password 已经是写出的 "*****")。username 没有"跳过"语义,
+         * 解析器会原样读成 "*****", 所以保持不动。 */
+        {
+            uint32_t crc;
+            char     hex[12];
+            cJSON   *meta;
+
+            qcfg.network.mqtt_password[0] = ' ';
+            crc = config_store_calc_crc(&qcfg);
+            meta = cJSON_GetObjectItem(data, "meta");
+            if ((meta != NULL) && (crc != 0u))
+            {
+                (void)snprintf(hex, sizeof(hex), "%08lX", (unsigned long)crc);
+                cJSON_DeleteItemFromObject(meta, "crc32");
+                (void)cJSON_AddStringToObject(meta, "crc32", hex);
+            }
         }
     }
 

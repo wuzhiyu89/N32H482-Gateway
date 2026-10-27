@@ -404,6 +404,25 @@ void config_store_factory_default(config_store_t *c)
         (void)strcpy(g->tts_text, "前方积水{level}厘米，禁止通行");
     }
 
+    /* ---- 3.5b gears 4~7: 预留档(仅存储/手动可选, 状态机不会自动选) ---- */
+    {
+        uint8_t gi;
+        char    nm[CFG_NAME_MAX + 1];
+
+        for (gi = 4u; gi < (uint8_t)CFG_GEAR_COUNT; gi++)
+        {
+            cfg_gear_t *g = &c->gears[gi];
+            (void)memset(g, 0, sizeof(*g));
+            g->gear            = gi;
+            g->targets_all     = 1u;
+            g->led_show_mode   = 1u;          /* 竖屏 */
+            g->sound_mode      = 0u;
+            (void)snprintf(nm, sizeof(nm), "预留%u", (unsigned)gi);
+            (void)strncpy(g->name, nm, sizeof(g->name) - 1u);
+            g->name[sizeof(g->name) - 1u] = '\0';
+        }
+    }
+
     /* ---- 3.6 devices: 清空 ---- */
     c->device_count = 0u;
 

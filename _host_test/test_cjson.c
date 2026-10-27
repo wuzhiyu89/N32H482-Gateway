@@ -103,7 +103,7 @@ static uint16_t build_config_json(char *buf, uint16_t cap,
     for (i = 0u; i < 4u; i++)
     {
         off = append(buf, cap, off,
-            "%s{\"gear\":%d,\"name\":\"g\",\"targets\":\"all\",\"soundMode\":%d,"
+            "%s{\"gear\":%d,\"name\":\"g\",\"targets\":\"all\",\"flashMode\":%d,"
             "\"ledColor\":\"red\",\"ledTextTemplate\":\"路面积水{level}CM 禁止通行\","
             "\"ttsTextTemplate\":\"前方积水{level}厘米，禁止通行\"}",
             (i == 0u) ? "" : ",", (int)i, (int)(i % 3u));

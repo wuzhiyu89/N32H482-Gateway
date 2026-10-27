@@ -483,7 +483,7 @@ static cfg_result_t cfg_parse_gears(const char *json, cfg_gear_t *gears, bool *p
 
         (void)snprintf(p, sizeof(p), "gears[%u].name", (unsigned)i);
         CFG_STR_ON_RANGE(json, p, g->name, CFG_NAME_MAX);
-        (void)snprintf(p, sizeof(p), "gears[%u].soundMode", (unsigned)i);
+        (void)snprintf(p, sizeof(p), "gears[%u].flashMode", (unsigned)i);
         /* ★2026-10-08: 上界 2 -> 3★ 0关闭/1常亮/2慢闪/3快闪 */
         r = cfg_get_u8(json, p, &e, 0u, 3u);             CFG_RET_ON_RANGE(r);
         if (r == CFG_GET_OK) { g->sound_mode = e; }
@@ -885,7 +885,21 @@ cfg_result_t config_store_from_json(config_store_t *c, const char *json)
     /* CRC 校验必须在 merge 之后: 此时 c 才是这份 JSON 的完整解析结果。
      * 先重新序列化一次拿到"应有"的 CRC, 再和 JSON 里声明比 —— 这一步同时
      * 验证了【序列化器与解析器互为逆运算】: 任何一边丢字段/截断都会在这里暴露。 */
-    if ((t == CJ_OBJ) && (cj_get(json, "meta.crc32", NULL, 0) == CJ_STR))
+    {
+        char cred[48];
+        bool masked = false;
+
+        if (cj_get_str(json, "network.password", cred, (uint16_t)sizeof(cred)) &&
+            (strcmp(cred, "*****") == 0)) { masked = true; }
+        if (cj_get_str(json, "network.username", cred, (uint16_t)sizeof(cred)) &&
+            (strcmp(cred, "*****") == 0)) { masked = true; }
+
+    /* ★2026-10-27: 掩码配置不做 CRC 自校验★
+     * cfg.query 会把 username/password 掩成 5 个星号; 解析器对 password 的
+     * "*****" 有"不修改"语义(保留出厂默认), 因此读回后的配置与应答里的 CRC
+     * 必然对不上。掩码视图只用于展示, 跳过 CRC 校验, 否则 cfg.query 的应答
+     * 自己都读不回来。 */
+    if ((!masked) && (t == CJ_OBJ) && (cj_get(json, "meta.crc32", NULL, 0) == CJ_STR))
     {
         char     hex[12];
         uint32_t want;
@@ -898,6 +912,7 @@ cfg_result_t config_store_from_json(config_store_t *c, const char *json)
             if ((want == 0u) || (want != have)) { return CFG_ERR_CRC; }
             c->meta.crc32 = want;
         }
+    }
     }
 
     return CFG_OK;

@@ -93,7 +93,7 @@ extern "C" {
                                      *     "最坏情况 < CFG_JSON_MAX" 那条断言;
                                      *   · cJSON 池峰值要重跑 test_cjson 复测。 */
 #define CFG_DEVICE_MAX      5       /* devices[] 0~5(文档一致) */
-#define CFG_GEAR_COUNT      4       /* gears[]   固定 0~3 */
+#define CFG_GEAR_COUNT      4       /* gears[] 0~3 (4~7 需先解决 RAM/JSON 预算) */
 
 /* ==================== 子设备寻址: 13 字节 UID（2026-10-18 由 3 字节扩到 13） ====================
  *

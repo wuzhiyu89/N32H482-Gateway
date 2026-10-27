@@ -178,19 +178,19 @@ static void test_full_config(void)
          *   ledColor          单值 -> "第一个半屏,第二个半屏"
          *   ledTextTemplate   单段 -> ledTextTemplate1 + ledTextTemplate2
          *   ledShowMode / ledTextShowMode  新增
-         *   soundMode         0~3(3 = 快闪) */
-        "{\"gear\":0,\"name\":\"解除\",\"targets\":\"all\",\"soundMode\":0,"
+         *   flashMode         0~3(3 = 快闪) */
+        "{\"gear\":0,\"name\":\"解除\",\"targets\":\"all\",\"flashMode\":0,"
         "\"ledShowMode\":0,\"ledTextShowMode\":\"0,0\",\"ledColor\":\"off,off\","
         "\"ledTextTemplate1\":\"\",\"ledTextTemplate2\":\"\",\"ttsTextTemplate\":\"\"},"
-        "{\"gear\":1,\"name\":\"正常\",\"targets\":\"all\",\"soundMode\":1,"
+        "{\"gear\":1,\"name\":\"正常\",\"targets\":\"all\",\"flashMode\":1,"
         "\"ledShowMode\":0,\"ledTextShowMode\":\"2,2\",\"ledColor\":\"green,green\","
         "\"ledTextTemplate1\":\"路面积水{level}CM\",\"ledTextTemplate2\":\"缓慢通行\","
         "\"ttsTextTemplate\":\"\"},"
-        "{\"gear\":2,\"name\":\"预警\",\"targets\":[\"31000000000000000000000001\",\"31000000000000000000000002\"],\"soundMode\":2,"
+        "{\"gear\":2,\"name\":\"预警\",\"targets\":[\"31000000000000000000000001\",\"31000000000000000000000002\"],\"flashMode\":2,"
         "\"ledShowMode\":1,\"ledTextShowMode\":\"1,2\",\"ledColor\":\"yellow,red\","
         "\"ledTextTemplate1\":\"路面积水{level}CM\",\"ledTextTemplate2\":\"谨慎通行\","
         "\"ttsTextTemplate\":\"\"},"
-        "{\"gear\":3,\"name\":\"告警\",\"targets\":[\"31000000000000000000000001\"],\"soundMode\":3,"
+        "{\"gear\":3,\"name\":\"告警\",\"targets\":[\"31000000000000000000000001\"],\"flashMode\":3,"
         "\"ledShowMode\":0,\"ledTextShowMode\":\"1,0\",\"ledColor\":\"red,yellow\","
         "\"ledTextTemplate1\":\"路面积水{level}CM\",\"ledTextTemplate2\":\"禁止通行\","
         "\"ttsTextTemplate\":\"前方积水{level}厘米，禁止通行\"}],"
@@ -215,9 +215,9 @@ static void test_full_config(void)
             "{\"network\":{\"port\":1883}}",
             "{\"sensors\":[{\"uid\":\"21000000000000000000000001\",\"reportPeriodSeconds\":60}]}",
             "{\"devices\":[{\"uid\":\"31000000000000000000000001\",\"type\":3,\"volume\":60}]}",
-            "{\"gears\":[{\"gear\":3,\"soundMode\":3,\"targets\":[\"31000000000000000000000001\"]}]}",
-            "{\"gears\":[{\"gear\":1,\"soundMode\":1,\"targets\":[]}]}",
-            "{\"gears\":[{\"gear\":1,\"soundMode\":1,\"targets\":\"all\"}]}",
+            "{\"gears\":[{\"gear\":3,\"flashMode\":3,\"targets\":[\"31000000000000000000000001\"]}]}",
+            "{\"gears\":[{\"gear\":1,\"flashMode\":1,\"targets\":[]}]}",
+            "{\"gears\":[{\"gear\":1,\"flashMode\":1,\"targets\":\"all\"}]}",
             "{\"thresholds\":{\"alarmCm\":20,\"warningCm\":10,\"resolveCm\":5}}",
             "{\"rules\":{\"mode\":\"auto\"}}"
         };

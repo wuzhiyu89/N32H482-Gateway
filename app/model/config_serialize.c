@@ -169,7 +169,7 @@ static bool cfg_write_domains(cJSON *root, const config_store_t *c)
             (void)snprintf(alignbuf, sizeof(alignbuf), "%u,%u",
                 (unsigned)g->led_text_show_mode[0], (unsigned)g->led_text_show_mode[1]);
 
-            if ((cJSON_AddNumberToObject(o, "soundMode", (double)g->sound_mode) == NULL) ||
+            if ((cJSON_AddNumberToObject(o, "flashMode", (double)g->sound_mode) == NULL) ||
                 (cJSON_AddNumberToObject(o, "ledShowMode", (double)g->led_show_mode) == NULL) ||
                 (cJSON_AddStringToObject(o, "ledTextShowMode", alignbuf) == NULL) ||
                 (cJSON_AddStringToObject(o, "ledColor", colorbuf) == NULL) ||

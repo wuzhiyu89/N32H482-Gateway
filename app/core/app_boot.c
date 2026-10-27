@@ -181,6 +181,14 @@ void app_boot_run(void)
      *   ⚠️ 唯一要警惕的: 固定 clientID + 同一个 broker = 多台网关互相顶下线。
      *      单台测试没问题; 上第二台时把 `network.clientId` 配成唯一值(或 "IMEI")。 */
     {
+        /* ★2026-10-27 用户要求: 上电强制回 auto★
+         * 只改 RAM, 不写 Flash(不抬 configVersion); 每次上电都生效。 */
+        if (config_store_get()->rules.mode == (uint8_t)CFG_RULE_MANUAL)
+        {
+            config_store_get_mut()->rules.mode = (uint8_t)CFG_RULE_AUTO;
+            log_info("[BOOT] 上电强制回 auto(manual 不跨重启保持, RAM-only)\r\n");
+        }
+
         const config_store_t *cfg = config_store_get();
         const char *dev_id = ((cfg != NULL) && (cfg->system.gw_id[0] != '\0'))
                                  ? cfg->system.gw_id : "11000000000000000000000000";   /* 2026-10-18: 兜底也 26 位 */
