@@ -92,6 +92,11 @@ static bool _unbind_finalize(const uint8_t uid[CFG_UID_BYTES], bool is_sensor)
     char  uid_hex[CFG_UID_STR_MAX];
     /* cfg_uid_from_bytes 把 13 字节转 hex, 不会失败(非全 0 即有效) */
     (void)cfg_uid_from_bytes(uid, uid_hex);
+    /* ★2026-10-27: 解绑成功后清掉该 UID 遗留的下发缓存★
+     * 典型场景: 曾用本地 #bind(默认液位)把声光误绑成液位, 排过一条 0x01(带校时);
+     * 解绑/重绑成声光后缓存还在, 声光 IDLE 时会被 lora_try_send_alarm_idle() 发出去
+     * -> "声光又被校时"。这里一并清掉。 */
+    (void)data_cache_down_del_by_uid((uint8_t *)uid);
     (void)config_store_unbind_device(uid_hex, cloud_proto_get_now_ts());
     log_info("[UNBIND] %02X%02X%02X(%s) 已删除 config_store, 触发 UNBOUND 事件\r\n",
              uid[0], uid[1], uid[2], uid_hex);

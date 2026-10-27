@@ -239,6 +239,11 @@ void lora_bind_handle_dev_ack(const lora_frame_t *frame)
     /* cfg_uid_from_bytes 把 13 字节转 hex, 不会失败(非全 0 即有效) */
     (void)cfg_uid_from_bytes(g_bind.pending_uid, uid_hex);
 
+    /* ★2026-10-27: 绑定前残留的下发缓存一律作废★
+     * 新绑定不继承旧指令 —— 尤其是"曾被误绑成液位"时排下的 0x01(带校时),
+     * 否则重绑成声光后它还会被当成待发指令发出去。 */
+    (void)data_cache_down_del_by_uid(g_bind.pending_uid);
+
     /* 2) 追加到运行期从机表(失败就别写 config_store, 免得两边不一致) */
     slave_type_t type = g_bind.is_sensor ? SLAVE_TYPE_SENSOR : SLAVE_TYPE_ALARM_OUT;
     int idx = lora_slave_add(g_bind.pending_uid, type);
