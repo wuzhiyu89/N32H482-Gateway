@@ -65,6 +65,20 @@ static void test_gear_payload(void)
           "★ 档位0: 总电源=0(关) 音量=50, 三段长度域都是0 (n=%u)", (unsigned)n);
     CHECK((buf[4] == 0u) && (buf[5] == 0u) && (buf[6] == 0u),
           "★ 三个长度字节都在 [4][5][6] 且为 0");
+    /* ---- off fail-safe 故障画面: 电源开/不闪/音量0/竖屏/居中/黄黄 ---- */
+    memset(&g, 0, sizeof(g));
+    g.gear = 1u; g.sound_mode = 0u; g.led_show_mode = 1u;
+    g.led_text_show_mode[0] = 0u; g.led_text_show_mode[1] = 0u;
+    g.led_color[0] = (uint8_t)CFG_COLOR_YELLOW;
+    g.led_color[1] = (uint8_t)CFG_COLOR_YELLOW;
+    n = level_gear_build_payload(&g, 0u, "设备故障", "勿依赖提示", "", buf, sizeof(buf));
+    CHECK((n == 34u) && (buf[0] == 1u) && (buf[1] == 0u) && (buf[2] == 0u),
+          "★ off 故障画面: 电源开/不闪/音量0 (n=%u)", (unsigned)n);
+    CHECK(buf[3] == 0x8Fu, "★ off 故障画面: 竖屏+两行居中+黄黄 => 0x8F (实际 0x%02X)",
+          (unsigned)buf[3]);
+    CHECK((buf[4] == 12u) && (buf[17] == 15u) && (buf[33] == 0u),
+          "★ off 故障画面: 两行长度/无TTS 正确");
+
 
     /* ---- ★[3] LED屏模式 位定义(最容易错的一字节)★ ----
      * bit7 横竖 | bit6 预留0 | bit5 半屏1对齐 | bit4 半屏2对齐

@@ -116,7 +116,14 @@ void app_fill_status(cloud_status_t *st)
      *   以前这里恒填 "auto"/0, 平台看到的档位永远是 0。
      *   mode 暂时仍恒 "auto": manual 模式要等第 6 条(dev.ctrl)落地后才有第二种取值。 */
     st->mode           = "auto";
-    st->current_gear   = app_live_gear();
+    /* off fail-safe: 数据不可信 -> Offline + gear null */
+    {
+        bool off = app_level_off_failsafe_active();
+
+        st->current_status = off ? "Offline" : app_live_state_name();
+        st->gear_null      = off;
+        st->current_gear   = app_live_gear();
+    }
 }
 
 sys_err_t app_publish_status_json(void)
@@ -270,8 +277,13 @@ static sys_err_t uplink_publish_telemetry(int32_t avg_mm)
     t.sensor_count        = n;
     t.sensors             = sens;
     t.effective_level_mm  = avg_mm;
-    t.effective_status    = app_live_state_name();
-    t.effective_gear      = app_live_gear();
+    {
+        bool off = app_level_off_failsafe_active();
+
+        t.effective_status = off ? "Offline" : app_live_state_name();
+        t.gear_null        = off;
+        t.effective_gear   = app_live_gear();
+    }
 
     dlen = cloud_proto_build_telemetry_data(data, (uint16_t)sizeof(data), &t);
     if (dlen == 0u)
@@ -531,9 +543,14 @@ void app_telemetry_backfill_poll(void)
     t.sensor_count       = 1u;          /* 一条记录就一台 */
     t.sensors            = &s1;
     t.effective_level_mm = (int32_t)rec->level_mm;   /* 只有这一个数据点, 有效值就是它 */
-    t.effective_status   = (rec->state != 0u) ? cloud_proto_state_name(rec->state)
-                                              : "Normal";   /* 与 app_live_state_name 同口径 */
-    t.effective_gear     = rec->gear;
+    {
+        bool off = app_level_off_failsafe_active();
+
+        t.effective_status = off ? "Offline"
+            : ((rec->state != 0u) ? cloud_proto_state_name(rec->state) : "Normal");
+        t.gear_null        = off;
+        t.effective_gear   = rec->gear;
+    }
 
     dlen = cloud_proto_build_telemetry_data(data, (uint16_t)sizeof(data), &t);
     if (dlen == 0u)

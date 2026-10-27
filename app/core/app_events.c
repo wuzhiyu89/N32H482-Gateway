@@ -330,6 +330,47 @@ void app_publish_bind_event(const char *uid_hex, bool is_sensor,
  *   这里按当前 rules.mode 反推: manual -> "manual", 其余 -> "auto"。
  *   够用且不撒谎 —— failsafe 触发的动作在 manual 模式下本来也不会发。
  * ================================================================== */
+void app_event_action_failsafe(void)
+{
+    static char           data[128];
+    static char           payload[CLOUD_RESP_MAX];
+    static char           topic[64];
+    static uint16_t       seq;
+    cloud_action_event_t  ae;
+    char                  msg_id[20];
+    uint16_t              dlen;
+    uint16_t              plen;
+    uint16_t              tlen;
+
+    (void)memset(&ae, 0, sizeof(ae));
+    ae.gear         = 0u;
+    ae.gear_null    = true;
+    ae.trigger      = "failsafe";
+    ae.result_count = 0u;
+    ae.results      = NULL;
+
+    dlen = cloud_proto_build_action_data(data, (uint16_t)sizeof(data), &ae);
+    if (dlen == 0u) { return; }
+
+    seq++;
+    (void)utils_gen_msg_id_seq(msg_id, (uint16_t)sizeof(msg_id), (uint8_t)'a',
+                              (uint16_t)(seq % 1000u));
+    plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
+                                    "event.action", msg_id, app_now_unix(), data);
+    if (plen == 0u) { return; }
+    tlen = cloud_profile_build_topic(CLOUD_TOPIC_EVENT, topic, (uint16_t)sizeof(topic));
+    if (tlen == 0u) { return; }
+
+    if (!g4_at_is_online())
+    {
+        log_info("[CLOUD] event.action(failsafe) 4G 不在线, 丢弃\r\n");
+        return;
+    }
+    (void)g4_at_mqtt_publish_ex(topic, (const uint8_t *)payload, plen,
+                                cloud_profile_topic_qos(CLOUD_TOPIC_EVENT),
+                                cloud_profile_topic_retained(CLOUD_TOPIC_EVENT));
+}
+
 void app_event_device_online(const char *uid_hex, bool online)
 {
     uplink_publish_device_event(uid_hex,
@@ -366,7 +407,8 @@ void app_on_alarm_result(const char *uid_hex, uint8_t gear,
      * 所以统一用 3001 表示"设备未能完成动作 / 无响应"。 */
     res.code = ok ? 0 : 3001;
 
-    ae.gear    = gear;
+    ae.gear      = gear;
+    ae.gear_null = false;
     ae.trigger = ((cfg != NULL) && (cfg->rules.mode == (uint8_t)CFG_RULE_MANUAL))
                      ? "manual" : "auto";
     ae.result_count = 1u;

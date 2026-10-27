@@ -606,6 +606,11 @@ typedef struct
  * \param out_total   可选: 目标总台数
  * \return >=0 成功受理的台数; -1 参数非法
  */
+/** off fail-safe 专用故障画面: 全屏两行, 不闪/无语音/音量0, 发给全部 enabled 声光.
+ *  res/cap 可选: 逐台填 uid+错误码, 供 event.action 使用. 返回投递台数. */
+int lora_business_apply_fault_display(lora_gear_result_t *res, uint8_t res_cap,
+                                      uint8_t *out_total);
+
 int lora_business_apply_gear_ex(uint8_t gear, const char *only_uid,
                                 const char *led_text1, const char *led_text2, const char *tts_text,
                                 lora_gear_result_t *res, uint8_t res_cap,

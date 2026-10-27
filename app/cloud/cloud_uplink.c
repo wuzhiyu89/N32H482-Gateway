@@ -373,6 +373,7 @@ uint16_t cloud_proto_render_cached_event(char *out, uint16_t cap,
                 return 0u;
             }
             ae.gear         = rec->a;       /* 档位 0~3, 由校验保证 */
+            ae.gear_null    = false;
             ae.trigger      = trig;
             ae.result_count = result_count;
             ae.results      = results;
@@ -451,8 +452,12 @@ bool cloud_fill_status_json(cJSON *obj, const cloud_status_t *st)
                 (double)st->uptime_s) != NULL) &&
             (cJSON_AddStringToObject(obj, "mode",
                 (st->mode != NULL) ? st->mode : "auto") != NULL) &&
-            (cJSON_AddNumberToObject(obj, "currentGear",
-                (double)st->current_gear) != NULL) &&
+            (cJSON_AddStringToObject(obj, "currentStatus",
+                (st->current_status != NULL) ? st->current_status : "Normal") != NULL) &&
+            ((st->gear_null != 0)
+                 ? (cJSON_AddNullToObject(obj, "currentGear") != NULL)
+                 : (cJSON_AddNumberToObject(obj, "currentGear",
+                        (double)st->current_gear) != NULL)) &&
             (cJSON_AddNumberToObject(obj, "sensorsOnline",
                 (double)st->sensors_online) != NULL) &&
             (cJSON_AddNumberToObject(obj, "sensorsTotal",
@@ -583,7 +588,9 @@ uint16_t cloud_proto_build_telemetry_data(char *out, uint16_t cap,
             (double)t->effective_level_mm / 10.0) == NULL) ||
         (cJSON_AddStringToObject(eff, "status",
             (t->effective_status != NULL) ? t->effective_status : "Normal") == NULL) ||
-        (cJSON_AddNumberToObject(eff, "gear", (double)t->effective_gear) == NULL))
+        ((t->gear_null != 0)
+             ? (cJSON_AddNullToObject(eff, "gear") == NULL)
+             : (cJSON_AddNumberToObject(eff, "gear", (double)t->effective_gear) == NULL)))
     {
         cJSON_Delete(root);
         out[0] = '\0';
@@ -726,7 +733,9 @@ uint16_t cloud_proto_build_action_data(char *out, uint16_t cap,
     }
 
     /* 键序按文档 7.3: gear / trigger / results[] */
-    if ((cJSON_AddNumberToObject(root, "gear", (double)e->gear) == NULL) ||
+    if (((e->gear_null != 0)
+             ? (cJSON_AddNullToObject(root, "gear") == NULL)
+             : (cJSON_AddNumberToObject(root, "gear", (double)e->gear) == NULL)) ||
         (cJSON_AddStringToObject(root, "trigger",
             (e->trigger != NULL) ? e->trigger : "auto") == NULL))
     {

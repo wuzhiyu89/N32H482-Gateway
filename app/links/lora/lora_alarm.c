@@ -214,6 +214,72 @@ static const cfg_gear_t *gear_style_effective(const config_store_t *cfg, uint8_t
     return &g_style_tmp;
 }
 
+int lora_business_apply_fault_display(lora_gear_result_t *res, uint8_t res_cap,
+                                      uint8_t *out_total)
+{
+    const config_store_t *cfg = config_store_get();
+    cfg_gear_t            fg;
+    uint8_t               sent = 0u;
+    uint8_t               total = 0u;
+    uint8_t               i;
+
+    if (cfg == NULL) { return -1; }
+
+    (void)memset(&fg, 0, sizeof(fg));
+    fg.gear             = 1u;                 /* 非 0 => 电源开, 不能用 gears[0] */
+    fg.sound_mode       = 0u;                 /* 不闪 */
+    fg.led_show_mode    = 1u;                 /* 竖屏 */
+    fg.led_text_show_mode[0] = 0u;            /* 居中 */
+    fg.led_text_show_mode[1] = 0u;
+    fg.led_color[0]     = (uint8_t)CFG_COLOR_YELLOW;
+    fg.led_color[1]     = (uint8_t)CFG_COLOR_YELLOW;
+
+    for (i = 0u; (i < cfg->device_count) && (i < (uint8_t)CFG_DEVICE_MAX); i++)
+    {
+        const cfg_device_t *d = &cfg->devices[i];
+        uint8_t  uid3[CFG_UID_BYTES];
+        uint8_t  payload[LEVEL_GEAR_PAYLOAD_MAX];
+        uint8_t  plen;
+        uint16_t code = 0u;
+        int      r;
+
+        if (d->enabled == 0u) { continue; }
+        total++;
+
+        if (!cfg_uid_to_bytes(d->uid, uid3))
+        {
+            code = 1007u;
+        }
+        else
+        {
+            plen = level_gear_build_payload(&fg, 0u, "设备故障", "勿依赖提示", "",
+                                            payload, (uint16_t)sizeof(payload));
+            if (plen == 0u)
+            {
+                code = 1007u;
+            }
+            else
+            {
+                r = lora_business_send_req(uid3, SLAVE_TYPE_ALARM_OUT,
+                                           LORA_FUNC_SET_ALARM, payload, plen);
+                if (r == 0) { sent++; }
+                else { code = (r == -1) ? 1007u : 1003u; }
+            }
+        }
+
+        if ((res != NULL) && (i < res_cap))
+        {
+            (void)snprintf(res[i].uid, sizeof(res[i].uid), "%s", d->uid);
+            res[i].code = code;
+        }
+    }
+
+    if (out_total != NULL) { *out_total = total; }
+    log_info("[LEVEL] !! off fail-safe 故障画面已投递 %u/%u 台声光\r\n",
+             (unsigned)sent, (unsigned)total);
+    return (int)sent;
+}
+
 int lora_business_apply_gear_ex(uint8_t gear, const char *only_uid,
                                 const char *led_text1, const char *led_text2, const char *tts_text,
                                 lora_gear_result_t *res, uint8_t res_cap,

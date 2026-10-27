@@ -662,7 +662,7 @@ static void test_status_data(void)
     CHECK(strcmp(buf,
                  "{\"online\":true,\"fwVersion\":\"1.0.0\",\"slot\":\"A\",\"configVersion\":7,"
                  "\"rsrp\":-85,\"uptimeSeconds\":3600,\"mode\":\"auto\","
-                 "\"currentGear\":2,\"sensorsOnline\":2,\"sensorsTotal\":2,"
+                 "\"currentStatus\":\"Normal\",\"currentGear\":2,\"sensorsOnline\":2,\"sensorsTotal\":2,"
                  "\"devicesOnline\":1,\"devicesTotal\":1}") == 0,
           "字段与文档 7.7 逐字符一致");
 
@@ -678,6 +678,16 @@ static void test_status_data(void)
     CHECK((n > 0u) && (strstr(buf, "\"rsrp\":0") != NULL), "rsrp=0 正常");
 
     CHECK(cloud_proto_build_status_data(NULL, 64u, &st) == 0u, "out=NULL -> 0");
+    /* off fail-safe: currentStatus=Offline + currentGear=null */
+    st.current_status = "Offline";
+    st.gear_null      = true;
+    n = cloud_proto_build_status_data(buf, (uint16_t)sizeof(buf), &st);
+    CHECK((n > 0u) && (strstr(buf, "\"currentStatus\":\"Offline\"") != NULL) &&
+          (strstr(buf, "\"currentGear\":null") != NULL),
+          "★ off fail-safe: status.report currentGear=null, currentStatus=Offline");
+    st.current_status = "Normal";
+    st.gear_null      = false;
+
     CHECK(cloud_proto_build_status_data(buf, 8u, &st) == 0u, "缓冲过小 -> 0");
 }
 
@@ -2275,6 +2285,16 @@ static void test_telemetry_data(void)
         "★ 与文档 7.1 的形状/字段逐字符一致(addr->uid)");
     CHECK(strstr(buf, "12.3") != NULL, "★ levelCm 是 12.3(不是 123, 也不是 12.300000…)");
     CHECK(strstr(buf, "12.3000000000") == NULL, "★ 没有浮点尾巴");
+    /* off fail-safe: status=Offline + gear=null */
+    t.effective_status = "Offline";
+    t.gear_null        = true;
+    n = cloud_proto_build_telemetry_data(buf, (uint16_t)sizeof(buf), &t);
+    CHECK((n > 0u) && (strstr(buf, "\"status\":\"Offline\"") != NULL) &&
+          (strstr(buf, "\"gear\":null") != NULL),
+          "★ off fail-safe: effective.status=Offline, gear=null");
+    t.effective_status = "Alarm";
+    t.gear_null        = false;
+
 
     /* 能整条包进上行信封 */
     n = cloud_proto_build_uplink(up, (uint16_t)sizeof(up), "telemetry.report",
@@ -2380,6 +2400,20 @@ static void test_action_and_buffered(void)
     CHECK(strcmp(buf, "{\"gear\":2,\"trigger\":\"auto\",\"results\":[{\"uid\":\"31000000000000000000000001\",\"code\":0}]}") == 0,
           "★ 与文档 7.3 形状逐字符一致(addr->uid) (实际 %s)", buf);
 
+
+    ae.gear_null    = true;
+    ae.gear         = 0u;
+    ae.result_count = 0u;
+    ae.results      = NULL;
+    ae.trigger      = "failsafe";
+    n = cloud_proto_build_action_data(buf, (uint16_t)sizeof(buf), &ae);
+    CHECK((n > 0u) && (strstr(buf, "\"gear\":null") != NULL) &&
+          (strstr(buf, "\"trigger\":\"failsafe\"") != NULL),
+          "★ off fail-safe: event.action gear=null, trigger=failsafe");
+    ae.gear_null    = false;
+    ae.gear         = 2u;
+    ae.result_count = 2u;
+    ae.results      = r;
     ae.result_count = 2u;
     ae.trigger      = "failsafe";
     n = cloud_proto_build_action_data(buf, (uint16_t)sizeof(buf), &ae);

@@ -89,6 +89,8 @@ void app_mode_pairing_run(void);   /* MAIN_MODE_PAIRING  */
 
 /* ---------------- 本地自治（水位 -> 联动） -------------------------------- */
 void app_failsafe_step(const level_decision_t *ld);   /* 全部失联 fail-safe */
+void app_event_action_failsafe(void);
+bool app_level_off_failsafe_active(void);              /* off 策略的故障画面期 */
 void app_manual_step(void);                            /* manual 窗口到期回归 */
 
 #ifdef __cplusplus

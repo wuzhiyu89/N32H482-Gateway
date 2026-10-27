@@ -143,6 +143,8 @@ typedef struct
     int16_t     rsrp_dbm;
     uint32_t    uptime_s;
     const char *mode;
+    const char *current_status;   /* Normal/Warning/Alarm/Offline; NULL -> Normal */
+    bool        gear_null;        /* true -> currentGear 输出 JSON null */
     uint8_t     current_gear;
     uint8_t     sensors_online;
     uint8_t     sensors_total;
@@ -182,7 +184,8 @@ typedef struct
     uint8_t                          sensor_count;
     const cloud_telemetry_sensor_t  *sensors;
     int32_t                          effective_level_mm;  /* 有效水位: 在线且 enabled 的取 max */
-    const char                      *effective_status;    /* Normal/Warning/Alarm/Resolved */
+    const char                      *effective_status;    /* Normal/Warning/Alarm/Resolved/Offline */
+    bool                             gear_null;           /* true -> effective.gear 输出 JSON null */
     uint8_t                          effective_gear;      /* 0~3 */
 } cloud_telemetry_t;
 
@@ -242,6 +245,7 @@ typedef struct
 typedef struct
 {
     uint8_t                      gear;
+    bool                         gear_null;   /* true -> gear 输出 JSON null */
     const char                  *trigger;    /* auto / manual / failsafe */
     uint8_t                      result_count;
     const cloud_action_result_t *results;
