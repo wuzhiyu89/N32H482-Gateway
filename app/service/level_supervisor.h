@@ -111,4 +111,7 @@ bool level_supervisor_last(int32_t *out_level_mm, uint8_t *out_gear);
  */
 void level_supervisor_force_next(void);
 
+/** manual -> auto 时强制下一次 dispatch(即使档位/文本没变) */
+void level_supervisor_force_dispatch(void);
+
 #endif /* __LEVEL_SUPERVISOR_H__ */

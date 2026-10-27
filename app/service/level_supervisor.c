@@ -15,6 +15,7 @@ static int32_t                s_last_mm;
 static uint8_t                s_last_gear;
 static bool                   s_last_ok;
 static bool                   s_force;      /* 下一次 poll 强制评估一次(无视"没有新上报") */
+static bool                   s_force_disp; /* 下一次 poll 强制 dispatch 一次(manual->auto) */
 static bool                   s_fail_active; /* 上一拍是否处于"全部失联"fail-safe 态(做边沿) */
 
 void level_supervisor_force_next(void)
@@ -38,6 +39,12 @@ void level_supervisor_init(void)
 void level_supervisor_mark_sent(uint8_t gear, const char *led_text1, const char *led_text2)
 {
     level_dispatch_mark(&s_disp, gear, led_text1, led_text2);
+    s_force_disp = false;       /* 已经真的发出去一份, 强制重发结束 */
+}
+
+void level_supervisor_force_dispatch(void)
+{
+    s_force_disp = true;
 }
 
 void level_supervisor_mark_event(int32_t level_mm, uint32_t now_ms)
@@ -216,6 +223,7 @@ void level_supervisor_poll(const config_store_t *cfg, uint32_t now_ms,
     {
         out->dispatch = level_dispatch_should_send(&s_disp, out->gear,
                                                    out->led_text1, out->led_text2);
+        if (s_force_disp) { out->dispatch = true; }   /* manual 结束: 强制刷一次屏 */
     }
 
     /* ---- 7) 该不该生成一条水位类事件 ---- */

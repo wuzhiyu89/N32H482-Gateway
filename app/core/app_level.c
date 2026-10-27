@@ -110,6 +110,7 @@ void app_manual_step(void)
             s_man_was = false;
             log_info("[CTRL] 已回到 auto 模式(自动联动恢复), 强制重评估一次\r\n");
             level_supervisor_force_next();
+            level_supervisor_force_dispatch();
         }
         return;
     }
