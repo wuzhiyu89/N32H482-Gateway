@@ -18,6 +18,9 @@
 #include "lora_business.h"      /* LORA_SENSOR_REPORT_DEFAULT_S */
 #include "log.h"
 
+/* cfg.query 的掩码副本 与 恢复出厂的工作副本 共用(单线程命令处理, 不会并发). */
+static config_store_t s_cfg_reset_tmp;
+
 /**
  * @brief cfg.set —— 文档 5.2
  *   data.expectVersion(uint32, 必填): 与当前 configVersion 不一致 -> 1002，且什么都不改；
@@ -292,28 +295,27 @@ int cloud_cmd_cfg_query(const cloud_req_t *req, cJSON *data)
      * 直接把 live 写出去再改 username/password 会导致 meta.crc32 与内容不一致
      * (读回自校验必失败)。这里复制一份、掩码后由同一个写入器生成, CRC 自然正确。 */
     {
-        static config_store_t qcfg;      /* 4KB static; 单线程命令处理, 不重入 */
+        config_store_t *qcfg = &s_cfg_reset_tmp;   /* 与恢复出厂共用一块 scratch */
 
-        (void)memcpy(&qcfg, config_store_get(), sizeof(qcfg));
-        (void)strcpy(qcfg.network.username, "*****");
-        (void)strcpy(qcfg.network.mqtt_password, "*****");
-        if (!config_store_write_members(data, &qcfg))
+        (void)memcpy(qcfg, config_store_get(), sizeof(*qcfg));
+        (void)strcpy(qcfg->network.username, "*****");
+        (void)strcpy(qcfg->network.mqtt_password, "*****");
+        if (!config_store_write_members(data, qcfg))
         {
             return CLOUD_EC_INTERNAL;
         }
 
         /* ★CRC 的特殊口径★ 解析器把 password=="*****" 当"不修改"跳过,
-         * 于是 from_json 读回时 password 仍是出厂空串。为了让 meta.crc32 与
-         * "读回后的配置"一致, 这里把 qcfg 的 password 置空再算一次 CRC(仅用于 CRC;
-         * 应答里的 password 已经是写出的 "*****")。username 没有"跳过"语义,
-         * 解析器会原样读成 "*****", 所以保持不动。 */
+         * 于是 from_json 读回时 password 仍是出厂默认。为了让 meta.crc32 与
+         * "读回后的配置"一致, 这里把 password 置空再算一次 CRC(仅用于 CRC;
+         * 应答里的 password 已经是写出的 "*****")。 */
         {
             uint32_t crc;
             char     hex[12];
             cJSON   *meta;
 
-            qcfg.network.mqtt_password[0] = ' ';
-            crc = config_store_calc_crc(&qcfg);
+            qcfg->network.mqtt_password[0] = '\0';
+            crc = config_store_calc_crc(qcfg);
             meta = cJSON_GetObjectItem(data, "meta");
             if ((meta != NULL) && (crc != 0u))
             {
@@ -339,7 +341,6 @@ int cloud_cmd_cfg_query(const cloud_req_t *req, cJSON *data)
 /* 恢复出厂的工作副本 + 需要保留下来的 network 域。
  * 都必须是文件级 static: config_store_t 约 1.7KB, 放 4KB 的栈上会爆
  * (startup_n32h47x_48x.s 的 Stack_Size)。本工程是单线程轮询, 不会重入。 */
-static config_store_t s_cfg_reset_tmp;
 static cfg_network_t  s_keep_network;
 
 int cloud_cmd_sys_factory_reset(const cloud_req_t *req, cJSON *data)
