@@ -24,6 +24,8 @@
 #include "bsp_tim.h"      /* get_tick_ms */
 #include "log.h"
 
+extern void app_event_device_online(const char *uid_hex, bool online);
+
 /* ==================== ★2026-10-08 声光(0x03)执行结果状态机的公共定义 ====================
  * 放在 lora_tx_downlink 之前: 它是发送咽喉, 每次真的发出去都要记账。
  * 状态机主体在下面 handle_ack_from_device 之前(见 lora_alarm_on_fail)。 */
@@ -53,6 +55,15 @@ void lora_alarm_fire_result(const lora_slave_t *s, bool ok, bool gave_up,
     char uid_hex[CFG_UID_STR_MAX];
 
     (void)cfg_uid_from_bytes(s->dev_uid, uid_hex);
+
+    /* off 故障画面的应答不产生常规 event.action(进入时已单独发 failsafe 事件) */
+    if (s->alarm_fault_display)
+    {
+        if (gave_up) { app_event_device_online(uid_hex, false); }
+        if (recovered) { app_event_device_online(uid_hex, true); }
+        ((lora_slave_t *)(void *)s)->alarm_fault_display = false;
+        return;
+    }
 
     log_info("[GEAR] 上报执行结果 uid=%s gear=%u ok=%u gave_up=%u recovered=%u\r\n",
              uid_hex, (unsigned)s->alarm_gear, ok ? 1u : 0u, gave_up ? 1u : 0u,
@@ -262,7 +273,13 @@ int lora_business_apply_fault_display(lora_gear_result_t *res, uint8_t res_cap,
             {
                 r = lora_business_send_req(uid3, SLAVE_TYPE_ALARM_OUT,
                                            LORA_FUNC_SET_ALARM, payload, plen);
-                if (r == 0) { sent++; }
+                if (r == 0)
+                {
+                    uint8_t si = lora_slave_find(uid3);
+
+                    if (si != 0xFFu) { g_slave_list[si].alarm_fault_display = true; }
+                    sent++;
+                }
                 else { code = (r == -1) ? 1007u : 1003u; }
             }
         }

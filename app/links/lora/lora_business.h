@@ -139,6 +139,7 @@ typedef struct
      *   设备后来恢复了也【没有任何"恢复"事件】—— 平台侧的离线告警会一直
      *   挂着, 只能靠人工确认。有了这个位, 恢复的第一时间就能自动补报。 */
     bool               alarm_offline_reported;
+    bool               alarm_fault_display; /* 本条是 off 故障画面: 不产生常规 event.action */
 } lora_slave_t;
 
 /* ========== 设备在线状态查询(★2026-10-18 新增) ==========
