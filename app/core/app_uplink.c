@@ -470,6 +470,18 @@ void app_on_level_report(const uint8_t uid[LORA_UID_BYTES],
  *        与 app_backfill_poll 同一条纪律: 【先发后删】, 登记失败一条都不动;
  *        "渲染不出来"的条也出队(否则永远堵在队头), 但会打日志。
  */
+static uint32_t _bf_msg_hash(const uint8_t uid[TELEMETRY_UID_BYTES],
+                              uint32_t ts, uint16_t seq)
+{
+    uint32_t h = 2166136261u;
+    uint8_t  i;
+
+    for (i = 0u; i < TELEMETRY_UID_BYTES; i++) { h ^= uid[i]; h *= 16777619u; }
+    h ^= ts;  h *= 16777619u;
+    h ^= seq; h *= 16777619u;
+    return (h != 0u) ? h : 1u;
+}
+
 void app_telemetry_backfill_poll(void)
 {
     /* 一律 static: 栈只有 4 KB */
@@ -485,14 +497,23 @@ void app_telemetry_backfill_poll(void)
     uint16_t           plen;
     uint16_t           tlen;
 
+    static uint32_t last_ms;
+
     if (!g4_at_is_online())
     {
         return;                     /* 还断着: 不补 */
     }
+    /* ★2026-10-27: 补报节流 1 条/秒(避免重连后瞬间灌满模组队列)★ */
+    if ((last_ms != 0u) && ((uint32_t)(get_tick_ms() - last_ms) < 1000u))
+    {
+        return;
+    }
+    last_ms = get_tick_ms();
 
     rec = telemetry_cache_peek();
     if (rec == NULL)
     {
+        last_ms = 0u;               /* 空了 -> 下一条不用等 */
         return;                     /* 没有待补的 */
     }
 
@@ -522,7 +543,8 @@ void app_telemetry_backfill_poll(void)
         return;
     }
 
-    (void)utils_gen_msg_id_seq(msg_id, (uint16_t)sizeof(msg_id), (uint8_t)'m', rec->msg_seq);
+    (void)snprintf(msg_id, sizeof(msg_id), "%08lx",
+                    (unsigned long)_bf_msg_hash(rec->uid, rec->ts, rec->msg_seq));
 
     /* ★信封 ts 也用 record 的 ts —— 不是补报时刻 */
     plen = cloud_proto_build_uplink(payload, (uint16_t)sizeof(payload),
@@ -825,10 +847,18 @@ void app_backfill_poll(void)
     uint16_t    n;
     uint16_t    tlen;
 
+    static uint32_t last_ms;
+
     if (!g4_at_is_online())
     {
         return;                     /* 断线期间不补报(补了也发不出去) */
     }
+    /* 事件补报同样 1 页/秒 */
+    if ((last_ms != 0u) && ((uint32_t)(get_tick_ms() - last_ms) < 1000u))
+    {
+        return;
+    }
+    last_ms = get_tick_ms();
 
     n = cloud_proto_build_backfill_data(data,
                                         (uint16_t)(sizeof(buf) - BACKFILL_HDR_MAX - BACKFILL_TAIL_MAX),
@@ -836,6 +866,7 @@ void app_backfill_poll(void)
                                         &consumed, &events, &skipped);
     if (consumed == 0u)
     {
+        last_ms = 0u;
         return;                     /* 缓存空, 或整页装不下(下次再来) */
     }
     if (skipped > 0u)
