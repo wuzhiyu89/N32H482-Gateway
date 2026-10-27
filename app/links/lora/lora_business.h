@@ -113,6 +113,7 @@ typedef struct
      * 用 last_recv_tick 去判失联会把"只回 ACK 不上报"的设备永远算成在线。 */
     uint32_t           last_report_tick;  /* 上次 0x02 上报的 tick ms */
     bool               offline_reported;  /* 已上报过"失联"、且还没等到新的 0x02 上报 */
+    uint32_t           offline_event_tick; /* 上次上报失联事件的 tick(每 3xperiod 重复) */
 
     /* ★2026-10-22: 低电量事件去重(平台 lowBatteryPercent 生效后新增)★
      *   true  = 已经报过 low_voltage, 电量没回到阈值以上就不再重复报;

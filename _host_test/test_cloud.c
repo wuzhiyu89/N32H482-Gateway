@@ -1387,6 +1387,38 @@ static void test_sensor_offline_logic(void)
               "NULL 入参 -> 安全返回 NONE(不崩)");
     }
 
+    /* ---- ★2026-10-27: 离线事件按 3xperiod 重复上报(新 API) ---- */
+    {
+        bool     online = true;
+        bool     reported = false;
+        uint32_t last_ev = 0u;
+
+        CHECK(sensor_offline_update_ex(&online, &reported, 0u, 0u, 60u, true, &last_ev)
+                  == SENSOR_OFFLINE_ACT_NONE,
+              "repeat: 首次上报在线, 不发恢复");
+        CHECK(sensor_offline_update_ex(&online, &reported, 180000u, 0u, 60u, false, &last_ev)
+                  == SENSOR_OFFLINE_ACT_REPORT_OFFLINE,
+              "repeat: 3x -> 第一次离线");
+        CHECK(last_ev == 180000u, "repeat: 记录本次事件时刻");
+        CHECK(sensor_offline_update_ex(&online, &reported, 359000u, 0u, 60u, false, &last_ev)
+                  == SENSOR_OFFLINE_ACT_NONE,
+              "repeat: 距上次事件不足 3x -> 不重复");
+        CHECK(sensor_offline_update_ex(&online, &reported, 360000u, 0u, 60u, false, &last_ev)
+                  == SENSOR_OFFLINE_ACT_REPORT_OFFLINE,
+              "repeat: 6x -> 第二次离线");
+        CHECK(sensor_offline_update_ex(&online, &reported, 540000u, 0u, 60u, false, &last_ev)
+                  == SENSOR_OFFLINE_ACT_REPORT_OFFLINE,
+              "repeat: 9x -> 第三次离线");
+        CHECK(sensor_offline_update_ex(&online, &reported, 550000u, 550000u, 60u, true, &last_ev)
+                  == SENSOR_OFFLINE_ACT_REPORT_ONLINE,
+              "repeat: 恢复只报一次 online");
+        CHECK((!reported) && (last_ev == 0u), "repeat: 恢复清标志与事件时刻");
+        CHECK(sensor_offline_update_ex(&online, &reported, 550000u + 180000u,
+                                       550000u, 60u, false, &last_ev)
+                  == SENSOR_OFFLINE_ACT_REPORT_OFFLINE,
+              "repeat: 恢复后重新按 3x 计时");
+    }
+
     /* ---- 按 UID 从配置里查上报周期 ---- */
     {
         static config_store_t c;        /* static: 与工程"大结构不放栈"的约定一致 */

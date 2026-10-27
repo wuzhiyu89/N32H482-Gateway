@@ -112,6 +112,19 @@ sensor_offline_action_t sensor_offline_update(bool *is_online, bool *offline_rep
                                              uint16_t report_period_s, bool got_report);
 
 /**
+ * @brief 同 sensor_offline_update(), 但失联后【每满一个 3xperiod 重复报一次】
+ *
+ * @param last_offline_event_ms 输入/输出: 上次上报失联事件的 tick。
+ *        首次判失联时写入 now; 之后每 (now - *last) >= 3xperiod 返回一次
+ *        REPORT_OFFLINE 并刷新它; 收到新 0x02 恢复时清零。
+ *        传 NULL 等价于旧的"只报一次"行为。
+ */
+sensor_offline_action_t sensor_offline_update_ex(bool *is_online, bool *offline_reported,
+                                                uint32_t now_ms, uint32_t last_report_ms,
+                                                uint16_t report_period_s, bool got_report,
+                                                uint32_t *last_offline_event_ms);
+
+/**
  * @brief 按 UID 从配置里查该液位传感器的上报周期(秒)
  * @param cfg     配置(可为 NULL, 返回默认值)
  * @param uid_hex 6 字符 hex 串, 如 "210001"

@@ -194,8 +194,9 @@ void lora_business_check_sensor_offline(void)
 
         /* got_report = false: 本帧不是它的上报, 只是"顺带检查"。
          * 它自己上报那条路径在 handle_sensor_report() 里(got_report = true)。 */
-        act = sensor_offline_update(&s->is_online, &s->offline_reported,
-                                    now_ms, s->last_report_tick, period_s, false);
+        act = sensor_offline_update_ex(&s->is_online, &s->offline_reported,
+                                       now_ms, s->last_report_tick, period_s, false,
+                                       &s->offline_event_tick);
 
         if (act == SENSOR_OFFLINE_ACT_REPORT_OFFLINE)
         {
@@ -234,8 +235,9 @@ static void handle_sensor_report(const lora_frame_t *frame, uint8_t slave_idx,
 
         /* got_report = true: 本帧就是这台设备的 0x02 上报。
          * 这里不需要周期(阈值只用于"没上报"的那一侧), 传 0 不影响结果。 */
-        act = sensor_offline_update(&s->is_online, &s->offline_reported,
-                                    now_ms, s->last_report_tick, 0u, true);
+        act = sensor_offline_update_ex(&s->is_online, &s->offline_reported,
+                                       now_ms, s->last_report_tick, 0u, true,
+                                       &s->offline_event_tick);
         if (act == SENSOR_OFFLINE_ACT_REPORT_ONLINE)
         {
             char uid[CFG_UID_STR_MAX];
