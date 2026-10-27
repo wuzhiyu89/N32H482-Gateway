@@ -54,6 +54,8 @@ _Static_assert(CFG_UID_BYTES == LORA_UID_BYTES,
 #include "bsp_tim.h"
 #include "log.h"
 
+extern void app_event_device_online(const char *uid_hex, bool online);
+
 /* 从机表(g_slave_list / g_slave_count)在 lora_slave.c，绑定/解绑/下发分别在
  * lora_bind.c / lora_unbind.c / lora_downlink.c，接口见 lora_internal.h。
  * 本文件只做帧分发、上行业务、失联检测与 init/poll。 */
@@ -466,6 +468,25 @@ static void handle_ack_from_device(const lora_frame_t *frame, uint8_t slave_idx)
     lora_slave_t *s = &g_slave_list[slave_idx];
     if (s->state != SLAVE_STATE_WAIT_ACK) return;   /* 不是等 ACK 状态, 忽略 */
 
+    /* ★0x09 在线查询的 ACK: 只更新在线状态, 不走 0x03 的结果状态机★ */
+    if (s->pending_func == (uint8_t)LORA_FUNC_PING_ALARM)
+    {
+        char uid_hex[CFG_UID_STR_MAX];
+
+        s->state     = SLAVE_STATE_IDLE;
+        s->retry_cnt = 0U;
+        (void)data_cache_down_del_if_match(s->dev_uid, s->pending_func,
+                                           s->pending_data, s->pending_data_len);
+        if (s->alarm_offline_reported)
+        {
+            s->alarm_offline_reported = false;
+            (void)cfg_uid_from_bytes(s->dev_uid, uid_hex);
+            app_event_device_online(uid_hex, true);
+            log_info("[GW] 声光 %s 0x09 ACK -> 恢复在线\r\n", uid_hex);
+        }
+        return;
+    }
+
     /* ==========================================================================
      * ★★2026-10-08: 声光(0x03)是"三段式"应答, 0x80 不再是终态★★
      * --------------------------------------------------------------------------
@@ -773,6 +794,47 @@ void lora_business_ensure_slaves(void)
             log_info("[GW] 配置里的设备 %s 不在从机表 -> 运行期补登记\r\n",
                      cfg->devices[i].uid);
         }
+    }
+}
+
+void lora_business_ping_alarms(void)
+{
+    const config_store_t *cfg = config_store_get();
+    static uint32_t       last_ms;
+    uint32_t              now = get_tick_ms();
+    uint8_t               i;
+
+    if (cfg == NULL) { return; }
+
+    /* 合并: 同一秒内多台液位上报只触发一轮 0x09 */
+    if ((last_ms != 0u) && ((uint32_t)(now - last_ms) < 1000u)) { return; }
+    last_ms = now;
+
+    for (i = 0u; (i < cfg->device_count) && (i < (uint8_t)CFG_DEVICE_MAX); i++)
+    {
+        uint8_t              uid[CFG_UID_BYTES];
+        uint8_t              idx;
+        lora_slave_t        *s;
+        cache_down_item_t    it;
+
+        if (cfg->devices[i].enabled == 0u) { continue; }
+        if (!cfg_uid_to_bytes(cfg->devices[i].uid, uid)) { continue; }
+
+        idx = lora_slave_find(uid);
+        if (idx == 0xFFU) { continue; }
+        s = &g_slave_list[idx];
+
+        if (s->state != SLAVE_STATE_IDLE) { continue; }
+
+        /* 缓存里还有 0x03 待发 -> 先发屏显, 不要用 0x09 顶掉 */
+        if (data_cache_down_fetch_by_uid(uid, &it) &&
+            (it.pay_len >= 1u) && (it.payload[0] == (uint8_t)LORA_FUNC_SET_ALARM))
+        {
+            continue;
+        }
+
+        (void)lora_business_send_req(uid, SLAVE_TYPE_ALARM_OUT,
+                                     (uint8_t)LORA_FUNC_PING_ALARM, NULL, 0u);
     }
 }
 

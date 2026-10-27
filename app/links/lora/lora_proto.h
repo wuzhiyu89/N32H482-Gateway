@@ -219,6 +219,7 @@ typedef enum
     LORA_FUNC_SET_SENSOR_PARAM   = 0x01U,   /* 云端→网关→液位传感器 设置传感器参数 */
     LORA_FUNC_SENSOR_REPORT      = 0x02U,   /* 液位传感器→网关→云端 上报液位数据 */
     LORA_FUNC_SET_ALARM          = 0x03U,   /* 云端→网关→声光报警器 设置声光报警器 */
+    LORA_FUNC_PING_ALARM         = 0x09U,   /* 网关→声光: 在线查询(无 data, 0x80 应答) */
     LORA_FUNC_BIND_REQ           = 0x04U,   /* 设备→网关广播 绑定请求(目标地址=FFFFFF) */
     LORA_FUNC_UNBIND             = 0x05U,   /* 网关→设备 解绑通知 */
     /* ★2026-10-18 新增: 出厂字段读写(仅产线/开发者用, 与云端无关)★

@@ -177,6 +177,13 @@ void app_loop_run(void)
                      * 不 mark, 等下次上报重试。lora_business 那边已打原因。 */
                 }
 
+                /* ---- (D1a) 水位未变化 -> 给声光发 0x09 在线查询 ---- */
+                if (ld.new_sample && ld.have_level && (!ld.dispatch) &&
+                    (!ld.auto_suppressed) && (!ld.failsafe))
+                {
+                    lora_business_ping_alarms();
+                }
+
                 /* ---- (D1b) 全部失联 fail-safe(第 7 条): 边沿触发, 只做一次 ---- */
                 app_failsafe_step(&ld);
 

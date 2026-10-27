@@ -26,6 +26,7 @@
 #include "bsp_tim.h"
 #include "config_store.h"
 #include "log.h"
+extern void app_event_device_online(const char *uid_hex, bool online);
 
 /* ==================== 0x01 液位参数载荷(18 字节) ====================
  *  [0-2]  上报间隔 秒(小端 24 位)      [3]    相同液位上报(固定 1)
@@ -257,6 +258,20 @@ void lora_downlink_logic(void)
              * ★2026-10-23: 改成条件删除 —— 重传窗口内云端可能已经下发了一条新指令,
              *   按 uid 无条件删会把那条新的也删掉, 等于静默丢掉云端的最新命令。
              *   不匹配(= 有更新的)就保留, 状态已回 IDLE, 下一拍会被正常捡起来发。 */
+            if (s->pending_func == (uint8_t)LORA_FUNC_PING_ALARM)
+            {
+                s->is_online = false;
+                log_info("[GW] !! 声光 %02X%02X%02X 0x09 无应答 -> 判离线\r\n",
+                         s->dev_uid[0], s->dev_uid[1], s->dev_uid[2]);
+                if (!s->alarm_offline_reported)
+                {
+                    char uid_hex[CFG_UID_STR_MAX];
+
+                    s->alarm_offline_reported = true;
+                    (void)cfg_uid_from_bytes(s->dev_uid, uid_hex);
+                    app_event_device_online(uid_hex, false);
+                }
+            }
             s->state     = SLAVE_STATE_IDLE;
             s->retry_cnt = 0U;
             if (!data_cache_down_del_if_match(s->dev_uid, s->pending_func,

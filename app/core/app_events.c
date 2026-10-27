@@ -330,6 +330,14 @@ void app_publish_bind_event(const char *uid_hex, bool is_sensor,
  *   这里按当前 rules.mode 反推: manual -> "manual", 其余 -> "auto"。
  *   够用且不撒谎 —— failsafe 触发的动作在 manual 模式下本来也不会发。
  * ================================================================== */
+void app_event_device_online(const char *uid_hex, bool online)
+{
+    uplink_publish_device_event(uid_hex,
+                                online ? (uint8_t)EC_DEV_EV_ONLINE
+                                       : (uint8_t)EC_DEV_EV_OFFLINE,
+                                "device");
+}
+
 void app_on_alarm_result(const char *uid_hex, uint8_t gear,
                                  bool ok, bool gave_up, bool recovered)
 {

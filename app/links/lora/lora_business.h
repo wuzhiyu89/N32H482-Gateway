@@ -243,6 +243,9 @@ void lora_business_init(void);
  */
 void lora_business_ensure_slaves(void);
 
+/** 给全部 enabled 声光排一条 0x09 在线查询(水位未变化时用) */
+void lora_business_ping_alarms(void);
+
 /**
  * \brief 业务层轮询 (main while(1) 持续调):
  *          协议层 poll → 帧分发 → ACK 超时重传检测
