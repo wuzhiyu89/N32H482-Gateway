@@ -37,12 +37,12 @@ static const char *const s_local_topic[CLOUD_TOPIC_COUNT] =
     "mod/lwt"           /* ★2026-10-08 新增★ 遗嘱专用 */
 };
 
-/* 文档 2 章: 下行命令/应答/事件/状态 QoS1, 遥测 QoS0。
+/* 文档 V0.2 起: 下行命令/应答/遥测/事件/状态全部 QoS1(遥测由 0 改为 1, 弱网丢包太多)。
  * ★lwt 用 QoS1★: 遗嘱只在掉电/断链那一刻发一条, 是最不能丢的消息,
  *   QoS0 的话"发出去就不管了" —— broker 没收到就永久丢了, 平台再也等不到掉线通知。 */
 static const uint8_t s_doc_qos[CLOUD_TOPIC_COUNT] =
 {
-    1u, 1u, 0u, 1u, 1u, 1u
+    1u, 1u, 1u, 1u, 1u, 1u
 };
 
 /* 文档: 只有 status 和 lwt 是 retained。

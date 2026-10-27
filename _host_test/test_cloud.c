@@ -484,7 +484,7 @@ static void test_profile_topic(void)
           "status 仍 retained(它现在只由本机主动上报维护, 不再被遗嘱覆盖)");
 
     /* 文档档位的 QoS/retained 按 s_doc_qos / s_doc_retained: 遥测 QoS0, 只有 status retained */
-    CHECK(cloud_profile_topic_qos(CLOUD_TOPIC_TELEMETRY) == 0u, "文档档位: telemetry QoS0");
+    CHECK(cloud_profile_topic_qos(CLOUD_TOPIC_TELEMETRY) == 1u, "文档档位: telemetry QoS1");
     CHECK(cloud_profile_topic_qos(CLOUD_TOPIC_CMD) == 1u, "文档档位: cmd QoS1");
     CHECK(cloud_profile_topic_retained(CLOUD_TOPIC_STATUS), "文档档位: status 发 retained");
     CHECK(!cloud_profile_topic_retained(CLOUD_TOPIC_TELEMETRY), "文档档位: telemetry 不 retained");
@@ -545,7 +545,7 @@ static void test_profile_topic(void)
 
     CHECK(cloud_profile_topic_qos(CLOUD_TOPIC_CMD) == 1u, "文档: cmd QoS1");
     CHECK(cloud_profile_topic_qos(CLOUD_TOPIC_CMDRESP) == 1u, "文档: cmdresp QoS1");
-    CHECK(cloud_profile_topic_qos(CLOUD_TOPIC_TELEMETRY) == 0u, "文档: telemetry QoS0");
+    CHECK(cloud_profile_topic_qos(CLOUD_TOPIC_TELEMETRY) == 1u, "文档: telemetry QoS1");
     CHECK(cloud_profile_topic_qos(CLOUD_TOPIC_EVENT) == 1u, "文档: event QoS1");
     CHECK(cloud_profile_topic_qos(CLOUD_TOPIC_STATUS) == 1u, "文档: status QoS1");
     CHECK(cloud_profile_topic_retained(CLOUD_TOPIC_STATUS), "文档: 只有 status retained");
