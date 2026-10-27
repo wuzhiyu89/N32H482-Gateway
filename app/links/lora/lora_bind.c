@@ -114,6 +114,31 @@ void lora_bind_send_ack_to_pending(void)
 /* 收到 0x04 绑定请求: 检查容量 → 登记 pending_uid → 立即回 0x80 */
 void lora_bind_handle_0x04(const lora_frame_t *frame)
 {
+    /* ★2026-10-27: UID 首字节必须与窗口类型一致★
+     *
+     * 0x04 帧本身【不带设备类型】, 网关只能靠开窗命令区分液位/声光。以前
+     * 本地 `#bind` 默认按液位开窗, 声光会被写进 sensors[]; 绑定成功后
+     * lora_bind_queue_sensor_sync() 立刻排队 0x01(含 6 字节校时) ->
+     * 现场就是"声光绑定后被校时"。
+     *
+     * 这里按 UID 首字节兜底: 液位窗口只收 21 开头, 声光窗口只收 31 开头;
+     * 不匹配就回 0x81 拒绝, 窗口保持打开(可以继续等正确的设备)。
+     */
+    {
+        uint8_t expect = g_bind.is_sensor ? 0x21U : 0x31U;
+
+        if (frame->dev_uid[0] != expect)
+        {
+            log_info("[BIND] !! %02X%02X%02X 的 UID 首字节 0x%02X 与窗口类型(%s)不符 -> 回 0x81 拒绝\r\n",
+                     frame->dev_uid[0], frame->dev_uid[1], frame->dev_uid[2],
+                     (unsigned)frame->dev_uid[0],
+                     g_bind.is_sensor ? "液位/21" : "声光/31");
+            (void)lora_business_send_ack(g_gw_uid, frame->dev_uid,
+                                         LORA_FUNC_BIND_REQ, false, 0x07U); /* 0x07 = 类型不符 */
+            return;
+        }
+    }
+
     /* 容量检查(总数≤5 / 液位≤4 / 声光≤3) —— 不够直接回 0x81, 不进入握手 */
     if (!config_store_can_add(g_bind.is_sensor))
     {

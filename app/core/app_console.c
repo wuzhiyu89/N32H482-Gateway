@@ -609,20 +609,30 @@ bool app_console_ext(const char *line)
      *     云端下发 sen.bind / dev.bind ⇒ 没有 4G 就永远开不了窗 ⇒ 绑不了。
      *   本命令把 open_bind_window() 暴露到控制台, 于是纯 LoRa 台架也能绑。
      *
-     * 用法: #bind                     (默认 sensor, 30 秒窗口)
-     *       #bind device 60           (声光, 60 秒)
+     * 用法: #bind sensor [window]     (液位, 默认 30 秒)
+     *       #bind device [window]     (声光)
+     * ⚠️ 必须显式给 sensor/device: 0x04 帧不带设备类型, 开错窗口会把声光
+     *    当成液位写入 sensors[] 并排队 0x01(带校时), 现场表现为"声光被校时"。
      * ⚠️ serial/name 留空 —— 那是平台侧的元数据, 离线时没有; 绑定后可用 cfg.set 补。
      * ⚠️ 声光默认 dev_type=3(一体机), 需要别的类型请用云端 dev.bind 下发。 */
     if (strncmp(line, "#bind", 5) == 0)
     {
         const char *p = line + 5;
-        bool        is_sensor = true;
-        unsigned    win_s     = 30u;
+        bool        is_sensor = false;
+        bool        type_given = false;
+        unsigned    win_s      = 30u;
 
         while (*p == ' ') { p++; }
 
-        if (strncmp(p, "device", 6) == 0)      { is_sensor = false; p += 6; }
-        else if (strncmp(p, "sensor", 6) == 0) { is_sensor = true;  p += 6; }
+        if (strncmp(p, "device", 6) == 0)      { is_sensor = false; type_given = true; p += 6; }
+        else if (strncmp(p, "sensor", 6) == 0) { is_sensor = true;  type_given = true; p += 6; }
+
+        if (!type_given)
+        {
+            log_info("[TEST] !! #bind 必须显式给类型: #bind sensor [窗口秒] / #bind device [窗口秒]\r\n");
+            log_info("[TEST]    0x04 帧不带设备类型, 开错窗口会把声光当液位绑(之后会收到 0x01 校时)\r\n");
+            return true;
+        }
 
         while (*p == ' ') { p++; }
         if ((*p >= '0') && (*p <= '9'))
